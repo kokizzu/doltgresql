@@ -15,18 +15,28 @@
 package ast
 
 import (
-	"fmt"
-
 	vitess "github.com/dolthub/vitess/go/vt/sqlparser"
 
 	"github.com/dolthub/doltgresql/postgres/parser/sem/tree"
 )
 
 // nodeShowTables handles *tree.ShowTables nodes.
-func nodeShowTables(node *tree.ShowTables) (vitess.Statement, error) {
+func nodeShowTables(ctx *Context, node *tree.ShowTables) (vitess.Statement, error) {
 	if node == nil {
 		return nil, nil
 	}
-	//TODO: this isn't supported in Postgres, but the parser has support for it as an extension. Should we keep it?
-	return nil, fmt.Errorf("SHOW TABLES is not yet supported")
+
+	var opts vitess.ShowTablesOpt
+
+	if node.ExplicitCatalog {
+		opts.DbName = node.CatalogName.String()
+		opts.SchemaName = node.SchemaName.String()
+	} else if node.ExplicitSchema {
+		opts.SchemaName = node.SchemaName.String()
+	}
+
+	return &vitess.Show{
+		Type:          "tables",
+		ShowTablesOpt: &opts,
+	}, nil
 }

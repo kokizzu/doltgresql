@@ -15,23 +15,34 @@
 package ast
 
 import (
+	"context"
 	"fmt"
 	"go/constant"
+	"strings"
 
+	"github.com/dolthub/go-mysql-server/sql/expression"
 	vitess "github.com/dolthub/vitess/go/vt/sqlparser"
+	"github.com/shopspring/decimal"
 
+	"github.com/dolthub/doltgresql/core/id"
 	"github.com/dolthub/doltgresql/postgres/parser/sem/tree"
+	"github.com/dolthub/doltgresql/postgres/parser/timeofday"
+	"github.com/dolthub/doltgresql/postgres/parser/types"
+	pgexprs "github.com/dolthub/doltgresql/server/expression"
+	"github.com/dolthub/doltgresql/server/functions/framework"
+	pgnodes "github.com/dolthub/doltgresql/server/node"
+	pgtypes "github.com/dolthub/doltgresql/server/types"
 )
 
 // nodeExprs handles tree.Exprs nodes.
-func nodeExprs(node tree.Exprs) (vitess.Exprs, error) {
+func nodeExprs(ctx *Context, node tree.Exprs) (vitess.Exprs, error) {
 	if len(node) == 0 {
 		return nil, nil
 	}
 	exprs := make(vitess.Exprs, len(node))
 	for i := range node {
 		var err error
-		if exprs[i], err = nodeExpr(node[i]); err != nil {
+		if exprs[i], err = nodeExpr(ctx, node[i]); err != nil {
 			return nil, err
 		}
 	}
@@ -39,51 +50,51 @@ func nodeExprs(node tree.Exprs) (vitess.Exprs, error) {
 }
 
 // nodeCompositeDatum handles tree.CompositeDatum nodes.
-func nodeCompositeDatum(node tree.CompositeDatum) (vitess.Expr, error) {
-	return nodeExpr(node)
+func nodeCompositeDatum(ctx *Context, node tree.CompositeDatum) (vitess.Expr, error) {
+	return nodeExpr(ctx, node)
 }
 
 // nodeConstant handles tree.Constant nodes.
-func nodeConstant(node tree.Constant) (vitess.Expr, error) {
-	return nodeExpr(node)
+func nodeConstant(ctx *Context, node tree.Constant) (vitess.Expr, error) {
+	return nodeExpr(ctx, node)
 }
 
 // nodeDatum handles tree.Datum nodes.
-func nodeDatum(node tree.Datum) (vitess.Expr, error) {
-	return nodeExpr(node)
+func nodeDatum(ctx *Context, node tree.Datum) (vitess.Expr, error) {
+	return nodeExpr(ctx, node)
 }
 
 // nodeSubqueryExpr handles tree.SubqueryExpr nodes.
-func nodeSubqueryExpr(node tree.SubqueryExpr) (vitess.Expr, error) {
-	return nodeExpr(node)
+func nodeSubqueryExpr(ctx *Context, node tree.SubqueryExpr) (vitess.Expr, error) {
+	return nodeExpr(ctx, node)
 }
 
 // nodeTypedExpr handles tree.TypedExpr nodes.
-func nodeTypedExpr(node tree.TypedExpr) (vitess.Expr, error) {
-	return nodeExpr(node)
+func nodeTypedExpr(ctx *Context, node tree.TypedExpr) (vitess.Expr, error) {
+	return nodeExpr(ctx, node)
 }
 
 // nodeVariableExpr handles tree.VariableExpr nodes.
-func nodeVariableExpr(node tree.VariableExpr) (vitess.Expr, error) {
-	return nodeExpr(node)
+func nodeVariableExpr(ctx *Context, node tree.VariableExpr) (vitess.Expr, error) {
+	return nodeExpr(ctx, node)
 }
 
 // nodeVarName handles tree.VarName nodes.
-func nodeVarName(node tree.VarName) (vitess.Expr, error) {
-	return nodeExpr(node)
+func nodeVarName(ctx *Context, node tree.VarName) (vitess.Expr, error) {
+	return nodeExpr(ctx, node)
 }
 
 // nodeExpr handles tree.Expr nodes.
-func nodeExpr(node tree.Expr) (vitess.Expr, error) {
+func nodeExpr(ctx *Context, node tree.Expr) (vitess.Expr, error) {
 	switch node := node.(type) {
 	case *tree.AllColumnsSelector:
 		return nil, fmt.Errorf("table.* syntax is not yet supported in this context")
 	case *tree.AndExpr:
-		left, err := nodeExpr(node.Left)
+		left, err := nodeExpr(ctx, node.Left)
 		if err != nil {
 			return nil, err
 		}
-		right, err := nodeExpr(node.Right)
+		right, err := nodeExpr(ctx, node.Right)
 		if err != nil {
 			return nil, err
 		}
@@ -94,82 +105,111 @@ func nodeExpr(node tree.Expr) (vitess.Expr, error) {
 	case *tree.AnnotateTypeExpr:
 		return nil, fmt.Errorf("ANNOTATE_TYPE is not yet supported")
 	case *tree.Array:
-		return nil, fmt.Errorf("arrays are not yet supported")
+		unresolvedChildren := make([]vitess.Expr, len(node.Exprs))
+		var coercedType *pgtypes.DoltgresType
+		if node.HasResolvedType() {
+			_, resolvedType, err := nodeResolvableTypeReference(ctx, node.ResolvedType())
+			if err != nil {
+				return nil, err
+			}
+			if resolvedType.IsArrayType() {
+				coercedType = resolvedType
+			} else {
+				return nil, fmt.Errorf("array has invalid resolved type")
+			}
+		}
+		for i, arrayExpr := range node.Exprs {
+			var err error
+			unresolvedChildren[i], err = nodeExpr(ctx, arrayExpr)
+			if err != nil {
+				return nil, err
+			}
+		}
+		arrayExpr, err := pgexprs.NewArray(coercedType)
+		if err != nil {
+			return nil, err
+		}
+		return vitess.InjectedExpr{
+			Expression: arrayExpr,
+			Children:   unresolvedChildren,
+		}, nil
 	case *tree.ArrayFlatten:
 		return nil, fmt.Errorf("flattening arrays is not yet supported")
 	case *tree.BinaryExpr:
-		left, err := nodeExpr(node.Left)
+		left, err := nodeExpr(ctx, node.Left)
 		if err != nil {
 			return nil, err
 		}
-		right, err := nodeExpr(node.Right)
+		right, err := nodeExpr(ctx, node.Right)
 		if err != nil {
 			return nil, err
 		}
-		var operator string
+		var operator framework.Operator
 		switch node.Operator {
 		case tree.Bitand:
-			operator = vitess.BitAndStr
+			operator = framework.Operator_BinaryBitAnd
 		case tree.Bitor:
-			operator = vitess.BitOrStr
+			operator = framework.Operator_BinaryBitOr
 		case tree.Bitxor:
-			operator = vitess.BitXorStr
+			operator = framework.Operator_BinaryBitXor
 		case tree.Plus:
-			operator = vitess.PlusStr
+			operator = framework.Operator_BinaryPlus
 		case tree.Minus:
-			operator = vitess.MinusStr
+			operator = framework.Operator_BinaryMinus
 		case tree.Mult:
-			operator = vitess.MultStr
+			operator = framework.Operator_BinaryMultiply
 		case tree.Div:
-			operator = vitess.DivStr
+			operator = framework.Operator_BinaryDivide
 		case tree.FloorDiv:
-			//TODO: replace with floor divide function
+			// TODO: replace with floor divide function
 			return nil, fmt.Errorf("the floor divide operator is not yet supported")
 		case tree.Mod:
-			operator = vitess.ModStr
+			operator = framework.Operator_BinaryMod
 		case tree.Pow:
-			//TODO: replace with power function
+			// TODO: replace with power function
 			return nil, fmt.Errorf("the power operator is not yet supported")
 		case tree.Concat:
-			//TODO: replace with concat function
-			return nil, fmt.Errorf("the concat operator is not yet supported")
+			operator = framework.Operator_BinaryConcatenate
 		case tree.LShift:
-			operator = vitess.ShiftLeftStr
+			operator = framework.Operator_BinaryShiftLeft
 		case tree.RShift:
-			operator = vitess.ShiftRightStr
+			operator = framework.Operator_BinaryShiftRight
 		case tree.JSONFetchVal:
-			return nil, fmt.Errorf("JSON operators are not yet supported")
+			operator = framework.Operator_BinaryJSONExtractJson
 		case tree.JSONFetchText:
-			return nil, fmt.Errorf("JSON operators are not yet supported")
+			operator = framework.Operator_BinaryJSONExtractText
 		case tree.JSONFetchValPath:
-			return nil, fmt.Errorf("JSON operators are not yet supported")
+			operator = framework.Operator_BinaryJSONExtractPathJson
 		case tree.JSONFetchTextPath:
-			return nil, fmt.Errorf("JSON operators are not yet supported")
+			operator = framework.Operator_BinaryJSONExtractPathText
 		default:
 			return nil, fmt.Errorf("the binary operator used is not yet supported")
 		}
-		return &vitess.BinaryExpr{
-			Operator: operator,
-			Left:     left,
-			Right:    right,
+		return vitess.InjectedExpr{
+			Expression: pgexprs.NewBinaryOperator(operator),
+			Children:   vitess.Exprs{left, right},
 		}, nil
 	case *tree.CaseExpr:
-		expr, err := nodeExpr(node.Expr)
+		expr, err := nodeExpr(ctx, node.Expr)
 		if err != nil {
 			return nil, err
 		}
 		whens := make([]*vitess.When, len(node.Whens))
 		for i := range node.Whens {
-			whens[i].Val, err = nodeExpr(node.Whens[i].Val)
+			val, err := nodeExpr(ctx, node.Whens[i].Val)
 			if err != nil {
 				return nil, err
 			}
-			whens[i].Cond, err = nodeExpr(node.Whens[i].Cond)
+			cond, err := nodeExpr(ctx, node.Whens[i].Cond)
 			if err != nil {
 				return nil, err
+			}
+			whens[i] = &vitess.When{
+				Val:  val,
+				Cond: cond,
 			}
 		}
-		else_, err := nodeExpr(node.Else)
+		else_, err := nodeExpr(ctx, node.Else)
 		if err != nil {
 			return nil, err
 		}
@@ -179,14 +219,69 @@ func nodeExpr(node tree.Expr) (vitess.Expr, error) {
 			Else:  else_,
 		}, nil
 	case *tree.CastExpr:
-		//TODO: finish the implementation
-		return &vitess.ConvertExpr{
-			Name: "",
-			Expr: nil,
-			Type: nil,
-		}, fmt.Errorf("CAST is not yet supported")
+		expr, err := nodeExpr(ctx, node.Expr)
+		if err != nil {
+			return nil, err
+		}
+
+		switch node.SyntaxMode {
+		case tree.CastExplicit, tree.CastShort:
+			// Both of these are acceptable
+		case tree.CastPrepend:
+			// used for typed literals
+			strVal, isStrVal := node.Expr.(*tree.StrVal)
+			t, isT := node.Type.(*types.T)
+			if isStrVal && isT {
+				typedExpr, err := strVal.ResolveAsType(context.TODO(), nil, t)
+				if err != nil {
+					return nil, fmt.Errorf("cannot resolve '%s' as type %s", strVal.String(), t.Name())
+				}
+				expr, err = nodeExpr(ctx, typedExpr)
+				if err != nil {
+					return nil, err
+				}
+			}
+		default:
+			return nil, fmt.Errorf("unknown cast syntax")
+		}
+
+		convertType, resolvedType, err := nodeResolvableTypeReference(ctx, node.Type)
+		if err != nil {
+			return nil, err
+		}
+
+		// If we have the resolved type, then we've got a Doltgres type instead of a GMS type
+		if !resolvedType.IsEmptyType() {
+			cast, err := pgexprs.NewExplicitCastInjectable(resolvedType)
+			if err != nil {
+				return nil, err
+			}
+			return vitess.InjectedExpr{
+				Expression: cast,
+				Children:   vitess.Exprs{expr},
+			}, nil
+		} else {
+			convertType, err = translateConvertType(convertType)
+			if err != nil {
+				return nil, err
+			}
+			return &vitess.ConvertExpr{
+				Name: "CAST",
+				Expr: expr,
+				Type: convertType,
+			}, nil
+		}
+
 	case *tree.CoalesceExpr:
-		return nil, fmt.Errorf("COALESCE is not yet supported")
+		exprs, err := nodeExprsToSelectExprs(ctx, node.Exprs)
+		if err != nil {
+			return nil, err
+		}
+
+		return &vitess.FuncExpr{
+			Name:  vitess.NewColIdent("COALESCE"),
+			Exprs: exprs,
+		}, nil
 	case *tree.CollateExpr:
 		return nil, fmt.Errorf("collations are not yet supported")
 	case *tree.ColumnAccessExpr:
@@ -206,32 +301,70 @@ func nodeExpr(node tree.Expr) (vitess.Expr, error) {
 	case *tree.CommentOnColumn:
 		return nil, fmt.Errorf("comment on column is not yet supported")
 	case *tree.ComparisonExpr:
-		left, err := nodeExpr(node.Left)
+		left, err := nodeExpr(ctx, node.Left)
 		if err != nil {
 			return nil, err
 		}
-		right, err := nodeExpr(node.Right)
+		right, err := nodeExpr(ctx, node.Right)
 		if err != nil {
 			return nil, err
 		}
 		var operator string
 		switch node.Operator {
 		case tree.EQ:
-			operator = vitess.EqualStr
+			return vitess.InjectedExpr{
+				Expression: pgexprs.NewBinaryOperator(framework.Operator_BinaryEqual),
+				Children:   vitess.Exprs{left, right},
+			}, nil
 		case tree.LT:
-			operator = vitess.LessThanStr
+			return vitess.InjectedExpr{
+				Expression: pgexprs.NewBinaryOperator(framework.Operator_BinaryLessThan),
+				Children:   vitess.Exprs{left, right},
+			}, nil
 		case tree.GT:
-			operator = vitess.GreaterThanStr
+			return vitess.InjectedExpr{
+				Expression: pgexprs.NewBinaryOperator(framework.Operator_BinaryGreaterThan),
+				Children:   vitess.Exprs{left, right},
+			}, nil
 		case tree.LE:
-			operator = vitess.LessEqualStr
+			return vitess.InjectedExpr{
+				Expression: pgexprs.NewBinaryOperator(framework.Operator_BinaryLessOrEqual),
+				Children:   vitess.Exprs{left, right},
+			}, nil
 		case tree.GE:
-			operator = vitess.GreaterEqualStr
+			return vitess.InjectedExpr{
+				Expression: pgexprs.NewBinaryOperator(framework.Operator_BinaryGreaterOrEqual),
+				Children:   vitess.Exprs{left, right},
+			}, nil
 		case tree.NE:
-			operator = vitess.NotEqualStr
+			return vitess.InjectedExpr{
+				Expression: pgexprs.NewBinaryOperator(framework.Operator_BinaryNotEqual),
+				Children:   vitess.Exprs{left, right},
+			}, nil
 		case tree.In:
-			operator = vitess.InStr
+			switch right := right.(type) {
+			case vitess.ValTuple:
+				return vitess.InjectedExpr{
+					Expression: pgexprs.NewInTuple(),
+					Children:   vitess.Exprs{left, right},
+				}, nil
+			case *vitess.Subquery:
+				return vitess.InjectedExpr{
+					Expression: pgexprs.NewInSubquery(),
+					Children:   vitess.Exprs{left, right},
+				}, nil
+			default:
+				return nil, fmt.Errorf("right side of IN expression is not a tuple or subquery, got %T", right)
+			}
 		case tree.NotIn:
-			operator = vitess.NotInStr
+			innerExpr := vitess.InjectedExpr{
+				Expression: pgexprs.NewInTuple(),
+				Children:   vitess.Exprs{left, right},
+			}
+			return vitess.InjectedExpr{
+				Expression: pgexprs.NewNot(),
+				Children:   vitess.Exprs{innerExpr},
+			}, nil
 		case tree.Like:
 			operator = vitess.LikeStr
 		case tree.NotLike:
@@ -252,26 +385,49 @@ func nodeExpr(node tree.Expr) (vitess.Expr, error) {
 			return nil, fmt.Errorf("~* is not yet supported")
 		case tree.NotRegIMatch:
 			return nil, fmt.Errorf("~* is not yet supported")
+		case tree.TextSearchMatch:
+			return nil, fmt.Errorf("@@ is not yet supported")
 		case tree.IsDistinctFrom:
 			return nil, fmt.Errorf("IS DISTINCT FROM is not yet supported")
 		case tree.IsNotDistinctFrom:
 			return nil, fmt.Errorf("IS NOT DISTINCT FROM is not yet supported")
 		case tree.Contains:
-			return nil, fmt.Errorf("@> is not yet supported")
+			return vitess.InjectedExpr{
+				Expression: pgexprs.NewBinaryOperator(framework.Operator_BinaryJSONContainsRight),
+				Children:   vitess.Exprs{left, right},
+			}, nil
 		case tree.ContainedBy:
-			return nil, fmt.Errorf("<@ is not yet supported")
+			return vitess.InjectedExpr{
+				Expression: pgexprs.NewBinaryOperator(framework.Operator_BinaryJSONContainsLeft),
+				Children:   vitess.Exprs{left, right},
+			}, nil
 		case tree.JSONExists:
-			return nil, fmt.Errorf("? is not yet supported")
+			return vitess.InjectedExpr{
+				Expression: pgexprs.NewBinaryOperator(framework.Operator_BinaryJSONTopLevel),
+				Children:   vitess.Exprs{left, right},
+			}, nil
 		case tree.JSONSomeExists:
-			return nil, fmt.Errorf("?| is not yet supported")
+			return vitess.InjectedExpr{
+				Expression: pgexprs.NewBinaryOperator(framework.Operator_BinaryJSONTopLevelAny),
+				Children:   vitess.Exprs{left, right},
+			}, nil
 		case tree.JSONAllExists:
-			return nil, fmt.Errorf("?& is not yet supported")
+			return vitess.InjectedExpr{
+				Expression: pgexprs.NewBinaryOperator(framework.Operator_BinaryJSONTopLevelAll),
+				Children:   vitess.Exprs{left, right},
+			}, nil
 		case tree.Overlaps:
 			return nil, fmt.Errorf("&& is not yet supported")
 		case tree.Any:
-			return nil, fmt.Errorf("ANY is not yet supported")
+			return vitess.InjectedExpr{
+				Expression: pgexprs.NewAnyExpr(node.SubOperator.String()),
+				Children:   vitess.Exprs{left, right},
+			}, nil
 		case tree.Some:
-			return nil, fmt.Errorf("SOME is not yet supported")
+			return vitess.InjectedExpr{
+				Expression: pgexprs.NewSomeExpr(node.SubOperator.String()),
+				Children:   vitess.Exprs{left, right},
+			}, nil
 		case tree.All:
 			return nil, fmt.Errorf("ALL is not yet supported")
 		default:
@@ -281,14 +437,16 @@ func nodeExpr(node tree.Expr) (vitess.Expr, error) {
 			Operator: operator,
 			Left:     left,
 			Right:    right,
-			Escape:   nil, //TODO: is '\' the default in Postgres as well?
+			Escape:   nil, // TODO: is '\' the default in Postgres as well?
 		}, nil
 	case *tree.DArray:
 		return nil, fmt.Errorf("the statement is not yet supported")
 	case *tree.DBitArray:
 		return nil, fmt.Errorf("the statement is not yet supported")
 	case *tree.DBool:
-		return nil, fmt.Errorf("the statement is not yet supported")
+		return vitess.InjectedExpr{
+			Expression: pgexprs.NewRawLiteralBool(bool(*node)),
+		}, nil
 	case *tree.DBox2D:
 		return nil, fmt.Errorf("the statement is not yet supported")
 	case *tree.DBytes:
@@ -296,13 +454,29 @@ func nodeExpr(node tree.Expr) (vitess.Expr, error) {
 	case *tree.DCollatedString:
 		return nil, fmt.Errorf("the statement is not yet supported")
 	case *tree.DDate:
-		return nil, fmt.Errorf("the statement is not yet supported")
+		t, err := node.Date.ToTime()
+		if err != nil {
+			return nil, err
+		}
+		return vitess.InjectedExpr{
+			Expression: pgexprs.NewRawLiteralDate(t),
+		}, nil
 	case *tree.DDecimal:
-		return nil, fmt.Errorf("the statement is not yet supported")
+		// TODO: should we use apd.Decimal for Numeric type values?
+		// |Coeff| is always positive, so need to |Negative| to negate the big.Int
+		bigInt := &node.Coeff
+		if node.Negative {
+			bigInt = bigInt.Neg(bigInt)
+		}
+		return vitess.InjectedExpr{
+			Expression: pgexprs.NewRawLiteralNumeric(decimal.NewFromBigInt(bigInt, node.Exponent)),
+		}, nil
 	case *tree.DEnum:
 		return nil, fmt.Errorf("the statement is not yet supported")
 	case *tree.DFloat:
-		return nil, fmt.Errorf("the statement is not yet supported")
+		return vitess.InjectedExpr{
+			Expression: pgexprs.NewRawLiteralFloat64(float64(*node)),
+		}, nil
 	case *tree.DGeography:
 		return nil, fmt.Errorf("the statement is not yet supported")
 	case *tree.DGeometry:
@@ -310,45 +484,112 @@ func nodeExpr(node tree.Expr) (vitess.Expr, error) {
 	case *tree.DIPAddr:
 		return nil, fmt.Errorf("the statement is not yet supported")
 	case *tree.DInt:
-		return nil, fmt.Errorf("the statement is not yet supported")
+		return vitess.InjectedExpr{
+			Expression: pgexprs.NewRawLiteralInt64(int64(*node)),
+		}, nil
 	case *tree.DInterval:
-		return nil, fmt.Errorf("the statement is not yet supported")
+		cast, err := pgexprs.NewExplicitCastInjectable(pgtypes.Interval)
+		if err != nil {
+			return nil, err
+		}
+		expr := pgexprs.NewIntervalLiteral(node.Duration)
+		return vitess.InjectedExpr{
+			Expression: cast,
+			Children:   vitess.Exprs{vitess.InjectedExpr{Expression: expr}},
+		}, nil
 	case *tree.DJSON:
-		return nil, fmt.Errorf("the statement is not yet supported")
+		// JSON type is handled in string format
+		return vitess.InjectedExpr{
+			Expression: pgexprs.NewRawLiteralJSON(node.JSON.String()),
+		}, nil
 	case *tree.DOid:
-		return nil, fmt.Errorf("the statement is not yet supported")
+		internalID := id.Cache().ToInternal(uint32(node.DInt))
+		if !internalID.IsValid() {
+			internalID = id.NewOID(uint32(node.DInt)).AsId()
+		}
+		return vitess.InjectedExpr{
+			Expression: pgexprs.NewRawLiteralOid(internalID),
+		}, nil
 	case *tree.DOidWrapper:
-		return nil, fmt.Errorf("the statement is not yet supported")
+		return nodeExpr(ctx, node.Wrapped)
 	case *tree.DString:
-		return nil, fmt.Errorf("the statement is not yet supported")
+		return vitess.InjectedExpr{
+			Expression: pgexprs.NewUnknownLiteral(string(*node)),
+		}, nil
 	case *tree.DTime:
-		return nil, fmt.Errorf("the statement is not yet supported")
+		return vitess.InjectedExpr{
+			Expression: pgexprs.NewRawLiteralTime(timeofday.TimeOfDay(*node).ToTime()),
+		}, nil
 	case *tree.DTimeTZ:
-		return nil, fmt.Errorf("the statement is not yet supported")
+		return vitess.InjectedExpr{
+			Expression: pgexprs.NewRawLiteralTimeTZ(node.TimeTZ.ToTime()),
+		}, nil
 	case *tree.DTimestamp:
-		return nil, fmt.Errorf("the statement is not yet supported")
+		return vitess.InjectedExpr{
+			Expression: pgexprs.NewRawLiteralTimestamp(node.Time),
+		}, nil
 	case *tree.DTimestampTZ:
-		return nil, fmt.Errorf("the statement is not yet supported")
+		return vitess.InjectedExpr{
+			Expression: pgexprs.NewRawLiteralTimestampTZ(node.Time),
+		}, nil
 	case *tree.DTuple:
 		return nil, fmt.Errorf("the statement is not yet supported")
 	case *tree.DUuid:
-		return nil, fmt.Errorf("the statement is not yet supported")
-	case *tree.DefaultVal:
-		return nil, fmt.Errorf("default values are not yet supported")
+		return vitess.InjectedExpr{
+			Expression: pgexprs.NewRawLiteralUuid(node.UUID),
+		}, nil
+	case tree.DefaultVal:
+		// TODO: can we use this?
+		defVal := &vitess.Default{ColName: ""}
+		return defVal, nil
+	case tree.DomainColumn:
+		_, dataType, err := nodeResolvableTypeReference(ctx, node.Typ)
+		if err != nil {
+			return nil, err
+		}
+		return vitess.InjectedExpr{
+			Expression: &pgnodes.DomainColumn{Typ: dataType},
+		}, nil
 	case *tree.FuncExpr:
-		return nodeFuncExpr(node)
+		return nodeFuncExpr(ctx, node)
 	case *tree.IfErrExpr:
 		return nil, fmt.Errorf("IFERROR is not yet supported")
 	case *tree.IfExpr:
-		//TODO: probably should be the IF function
-		return nil, fmt.Errorf("IF is not yet supported")
+		cond, err := nodeExpr(ctx, node.Cond)
+		if err != nil {
+			return nil, err
+		}
+		trueVal, err := nodeExpr(ctx, node.True)
+		if err != nil {
+			return nil, err
+		}
+		falseVal, err := nodeExpr(ctx, node.Else)
+		if err != nil {
+			return nil, err
+		}
+
+		// TODO: this could be a postgres func, but postgres doesn't have an IF function, this is an extension from cockroach
+		return &vitess.FuncExpr{
+			Name: vitess.NewColIdent("IF"),
+			Exprs: vitess.SelectExprs{
+				&vitess.AliasedExpr{
+					Expr: cond,
+				},
+				&vitess.AliasedExpr{
+					Expr: trueVal,
+				},
+				&vitess.AliasedExpr{
+					Expr: falseVal,
+				},
+			},
+		}, nil
 	case *tree.IndexedVar:
-		//TODO: figure out if I can delete this
+		// TODO: figure out if I can delete this
 		return nil, fmt.Errorf("this should probably be deleted (internal error, IndexedVar)")
 	case *tree.IndirectionExpr:
 		return nil, fmt.Errorf("subscripts are not yet supported")
 	case *tree.IsNotNullExpr:
-		expr, err := nodeExpr(node.Expr)
+		expr, err := nodeExpr(ctx, node.Expr)
 		if err != nil {
 			return nil, err
 		}
@@ -357,7 +598,7 @@ func nodeExpr(node tree.Expr) (vitess.Expr, error) {
 			Expr:     expr,
 		}, nil
 	case *tree.IsNullExpr:
-		expr, err := nodeExpr(node.Expr)
+		expr, err := nodeExpr(ctx, node.Expr)
 		if err != nil {
 			return nil, err
 		}
@@ -368,7 +609,7 @@ func nodeExpr(node tree.Expr) (vitess.Expr, error) {
 	case *tree.IsOfTypeExpr:
 		return nil, fmt.Errorf("IS OF is not yet supported")
 	case *tree.NotExpr:
-		expr, err := nodeExpr(node.Expr)
+		expr, err := nodeExpr(ctx, node.Expr)
 		if err != nil {
 			return nil, err
 		}
@@ -376,23 +617,43 @@ func nodeExpr(node tree.Expr) (vitess.Expr, error) {
 			Expr: expr,
 		}, nil
 	case *tree.NullIfExpr:
-		//TODO: probably should be the IF function: IF(Expr1 == Expr2, NULL, Expr1)
-		return nil, fmt.Errorf("NULLIF is not yet supported")
+		expr1, err := nodeExprToSelectExpr(ctx, node.Expr1)
+		if err != nil {
+			return nil, err
+		}
+
+		expr2, err := nodeExprToSelectExpr(ctx, node.Expr2)
+		if err != nil {
+			return nil, err
+		}
+
+		return &vitess.FuncExpr{
+			Name:  vitess.NewColIdent("NULLIF"),
+			Exprs: vitess.SelectExprs{expr1, expr2},
+		}, nil
+	case tree.NullLiteral:
+		return &vitess.NullVal{}, nil
 	case *tree.NumVal:
 		switch node.Kind() {
 		case constant.Int:
-			return vitess.NewIntVal([]byte(node.FormattedString())), nil
+			intLiteral, err := pgexprs.NewIntegerLiteral(node.FormattedString())
+			return vitess.InjectedExpr{
+				Expression: intLiteral,
+			}, err
 		case constant.Float:
-			return vitess.NewFloatVal([]byte(node.FormattedString())), nil
+			numericLiteral, err := pgexprs.NewNumericLiteral(node.FormattedString())
+			return vitess.InjectedExpr{
+				Expression: numericLiteral,
+			}, err
 		default:
 			return nil, fmt.Errorf("unknown number format")
 		}
 	case *tree.OrExpr:
-		left, err := nodeExpr(node.Left)
+		left, err := nodeExpr(ctx, node.Left)
 		if err != nil {
 			return nil, err
 		}
-		right, err := nodeExpr(node.Right)
+		right, err := nodeExpr(ctx, node.Right)
 		if err != nil {
 			return nil, err
 		}
@@ -401,7 +662,7 @@ func nodeExpr(node tree.Expr) (vitess.Expr, error) {
 			Right: right,
 		}, nil
 	case *tree.ParenExpr:
-		expr, err := nodeExpr(node.Expr)
+		expr, err := nodeExpr(ctx, node.Expr)
 		if err != nil {
 			return nil, err
 		}
@@ -413,56 +674,65 @@ func nodeExpr(node tree.Expr) (vitess.Expr, error) {
 	case *tree.PartitionMinVal:
 		return nil, fmt.Errorf("MINVALUE is not yet supported")
 	case *tree.Placeholder:
-		//TODO: figure out if I can delete this
-		panic("this should probably be deleted (internal error, Placeholder)")
+		// TODO: deal with type annotation
+		mysqlBindVarIdx := node.Idx + 1
+		return vitess.NewValArg([]byte(fmt.Sprintf(":v%d", mysqlBindVarIdx))), nil
 	case *tree.RangeCond:
-		operator := vitess.BetweenStr
-		if node.Not {
-			operator = vitess.NotBetweenStr
-		}
-		left, err := nodeExpr(node.Left)
+		left, err := nodeExpr(ctx, node.Left)
 		if err != nil {
 			return nil, err
 		}
-		from, err := nodeExpr(node.From)
+		from, err := nodeExpr(ctx, node.From)
 		if err != nil {
 			return nil, err
 		}
-		to, err := nodeExpr(node.To)
+		to, err := nodeExpr(ctx, node.To)
 		if err != nil {
 			return nil, err
 		}
+		retExpr := vitess.Expr(&vitess.AndExpr{
+			Left: vitess.InjectedExpr{
+				Expression: pgexprs.NewBinaryOperator(framework.Operator_BinaryGreaterOrEqual),
+				Children:   vitess.Exprs{left, from},
+			},
+			Right: vitess.InjectedExpr{
+				Expression: pgexprs.NewBinaryOperator(framework.Operator_BinaryLessOrEqual),
+				Children:   vitess.Exprs{left, to},
+			},
+		})
 		if node.Symmetric {
-			return &vitess.OrExpr{
-				Left: &vitess.RangeCond{
-					Operator: operator,
-					Left:     left,
-					From:     from,
-					To:       to,
+			retExpr = &vitess.OrExpr{
+				Left: retExpr,
+				Right: &vitess.AndExpr{
+					Left: vitess.InjectedExpr{
+						Expression: pgexprs.NewBinaryOperator(framework.Operator_BinaryGreaterOrEqual),
+						Children:   vitess.Exprs{left, to},
+					},
+					Right: vitess.InjectedExpr{
+						Expression: pgexprs.NewBinaryOperator(framework.Operator_BinaryLessOrEqual),
+						Children:   vitess.Exprs{left, from},
+					},
 				},
-				Right: &vitess.RangeCond{
-					Operator: operator,
-					Left:     left,
-					From:     to,
-					To:       from,
-				},
-			}, nil
-		} else {
-			return &vitess.RangeCond{
-				Operator: operator,
-				Left:     left,
-				From:     from,
-				To:       to,
-			}, nil
+			}
 		}
+		if node.Not {
+			retExpr = vitess.InjectedExpr{
+				Expression: pgexprs.NewNot(),
+				Children:   vitess.Exprs{retExpr},
+			}
+		}
+		return retExpr, nil
 	case *tree.StrVal:
-		//TODO: determine what to do when node.WasScannedAsBytes() is true
-		return &vitess.SQLVal{
-			Type: vitess.StrVal,
-			Val:  []byte(node.RawString()),
+		// TODO: determine what to do when node.WasScannedAsBytes() is true
+		// For string literals, we mark the type as unknown, because Postgres has
+		// more permissive implicit casting rules for literals than it does for strongly
+		// typed values from a schema for example.
+		unknownLiteral := pgexprs.NewUnknownLiteral(node.RawString())
+		return vitess.InjectedExpr{
+			Expression: unknownLiteral,
 		}, nil
 	case *tree.Subquery:
-		return nodeSubquery(node)
+		return nodeSubqueryOrExists(ctx, node)
 	case *tree.Tuple:
 		if len(node.Labels) > 0 {
 			return nil, fmt.Errorf("tuple labels are not yet supported")
@@ -471,7 +741,7 @@ func nodeExpr(node tree.Expr) (vitess.Expr, error) {
 			return nil, fmt.Errorf("ROW keyword for tuples not yet supported")
 		}
 
-		valTuple, err := nodeExprs(node.Exprs)
+		valTuple, err := nodeExprs(ctx, node.Exprs)
 		if err != nil {
 			return nil, err
 		}
@@ -479,30 +749,36 @@ func nodeExpr(node tree.Expr) (vitess.Expr, error) {
 	case *tree.TupleStar:
 		return nil, fmt.Errorf("(E).* is not yet supported")
 	case *tree.UnaryExpr:
-		expr, err := nodeExpr(node.Expr)
+		expr, err := nodeExpr(ctx, node.Expr)
 		if err != nil {
 			return nil, err
 		}
+		var operator framework.Operator
 		switch node.Operator {
+		// TODO: need to add UnaryPlus, it's like a no-op but Postgres actually implements it and it affects coercion
 		case tree.UnaryMinus:
-			return &vitess.UnaryExpr{
-				Operator: vitess.UMinusStr,
-				Expr:     expr,
-			}, nil
+			operator = framework.Operator_UnaryMinus
 		case tree.UnaryComplement:
 			return &vitess.UnaryExpr{
 				Operator: vitess.TildaStr,
 				Expr:     expr,
 			}, nil
 		case tree.UnarySqrt:
-			//TODO: replace with a function
+			// TODO: replace with a function
 			return nil, fmt.Errorf("square root operator is not yet supported")
 		case tree.UnaryCbrt:
-			//TODO: replace with a function
+			// TODO: replace with a function
 			return nil, fmt.Errorf("cube root operator is not yet supported")
+		case tree.UnaryAbsolute:
+			// TODO: replace with a function
+			return nil, fmt.Errorf("absolute operator is not yet supported")
 		default:
 			return nil, fmt.Errorf("the unary operator used is not yet supported")
 		}
+		return vitess.InjectedExpr{
+			Expression: pgexprs.NewUnaryOperator(operator),
+			Children:   vitess.Exprs{expr},
+		}, nil
 	case tree.UnqualifiedStar:
 		return nil, fmt.Errorf("* syntax is not yet supported in this context")
 	case *tree.UnresolvedName:
@@ -524,5 +800,39 @@ func nodeExpr(node tree.Expr) (vitess.Expr, error) {
 		return nil, nil
 	default:
 		return nil, fmt.Errorf("unknown expression: `%T`", node)
+	}
+}
+
+// translateConvertType translates the *vitess.ConvertType expression given to a new one, substituting type names as
+// appropriate. An error is returned if the type named cannot be supported.
+func translateConvertType(convertType *vitess.ConvertType) (*vitess.ConvertType, error) {
+	switch strings.ToLower(convertType.Type) {
+	// passthrough types that need no conversion
+	case expression.ConvertToBinary, expression.ConvertToChar, expression.ConvertToNChar, expression.ConvertToDate,
+		expression.ConvertToDatetime, expression.ConvertToFloat, expression.ConvertToDouble, expression.ConvertToJSON,
+		expression.ConvertToReal, expression.ConvertToSigned, expression.ConvertToTime, expression.ConvertToUnsigned:
+		return convertType, nil
+	case "text", "character varying", "varchar":
+		return &vitess.ConvertType{
+			Type: expression.ConvertToChar,
+		}, nil
+	case "integer", "bigint":
+		return &vitess.ConvertType{
+			Type: expression.ConvertToSigned,
+		}, nil
+	case "decimal", "numeric":
+		return &vitess.ConvertType{
+			Type: expression.ConvertToFloat,
+		}, nil
+	case "boolean":
+		return &vitess.ConvertType{
+			Type: expression.ConvertToSigned,
+		}, nil
+	case "timestamp", "timestamp with time zone", "timestamp without time zone":
+		return &vitess.ConvertType{
+			Type: expression.ConvertToDatetime,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unknown convert type: `%T`", convertType.Type)
 	}
 }

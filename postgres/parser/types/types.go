@@ -33,7 +33,6 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
 
-	"github.com/dolthub/doltgresql/postgres/parser/errorutil/unimplemented"
 	"github.com/dolthub/doltgresql/postgres/parser/geo/geopb"
 	"github.com/dolthub/doltgresql/postgres/parser/lex"
 	"github.com/dolthub/doltgresql/postgres/parser/oidext"
@@ -409,6 +408,11 @@ var (
 		Locale:                &emptyLocale,
 		IntervalDurationField: &IntervalDurationField{},
 	}}
+
+	// Json is the type of a JavaScript Object Notation (JSON) value that is
+	// stored in its original string format.
+	Json = &T{InternalType: InternalType{
+		Family: JsonFamily, Oid: oid.T_json, Locale: &emptyLocale}}
 
 	// Jsonb is the type of a JavaScript Object Notation (JSON) value that is
 	// stored in a decomposed binary format (hence the "b" in jsonb).
@@ -1521,6 +1525,8 @@ func (t *T) SQLStandardNameWithTypmod(haveTypmod bool, typmod int) string {
 			return "regprocedure"
 		case oid.T_regtype:
 			return "regtype"
+		case oid.T_xid:
+			return "xid"
 		default:
 			panic(errors.AssertionFailedf("unexpected Oid: %v", errors.Safe(t.Oid())))
 		}
@@ -1537,11 +1543,9 @@ func (t *T) SQLStandardNameWithTypmod(haveTypmod bool, typmod int) string {
 			}
 			buf.WriteString("character")
 		case oid.T_char:
-			// Type modifiers not allowed for "char".
-			return `"char"`
+			buf.WriteString(`"char"`)
 		case oid.T_name:
-			// Type modifiers not allowed for name.
-			return "name"
+			buf.WriteString("name")
 		default:
 			panic(errors.AssertionFailedf("unexpected OID: %d", t.Oid()))
 		}
@@ -1551,11 +1555,11 @@ func (t *T) SQLStandardNameWithTypmod(haveTypmod bool, typmod int) string {
 
 		// Typmod gets subtracted by 4 for all non-text string-like types to produce
 		// the length.
-		if t.Oid() != oid.T_text {
+		textTypes := t.Oid() == oid.T_text || t.Oid() == oid.T_name || t.Oid() == oid.T_char
+		if !textTypes {
 			typmod -= 4
 		}
-		if typmod <= 0 {
-			// In this case, we don't print any modifier.
+		if typmod < 0 || (typmod == 0 && !textTypes) {
 			return buf.String()
 		}
 		buf.WriteString(fmt.Sprintf("(%d)", typmod))
@@ -1627,11 +1631,11 @@ func (t *T) SQLString() string {
 	case IntFamily:
 		switch t.Width() {
 		case 16:
-			return "SMALLINT" //TODO: Return commented version, different function for MySQL string -> "INT2"
+			return "SMALLINT" // TODO: Return commented version, different function for MySQL string -> "INT2"
 		case 32:
-			return "INTEGER" //TODO: Return commented version, different function for MySQL string -> "INT4"
+			return "INTEGER" // TODO: Return commented version, different function for MySQL string -> "INT4"
 		case 64:
-			return "BIGINT" //TODO: Return commented version, different function for MySQL string -> "INT8"
+			return "BIGINT" // TODO: Return commented version, different function for MySQL string -> "INT8"
 		default:
 			panic(errors.AssertionFailedf("programming error: unknown int width: %d", t.Width()))
 		}
@@ -1640,8 +1644,8 @@ func (t *T) SQLString() string {
 	case CollatedStringFamily:
 		return t.collatedStringTypeSQL(false /* isArray */)
 	case FloatFamily:
-		const realName = "FLOAT"    //TODO: Return commented version, different function for MySQL string -> "FLOAT4"
-		const doubleName = "DOUBLE" //TODO: Return commented version, different function for MySQL string -> "FLOAT8"
+		const realName = "REAL"               // TODO: Return commented version, different function for MySQL string -> "FLOAT4"
+		const doubleName = "DOUBLE PRECISION" // TODO: Return commented version, different function for MySQL string -> "FLOAT8"
 		if t.Width() == 32 {
 			return realName
 		}
@@ -2387,28 +2391,6 @@ func IsStringType(t *T) bool {
 	}
 }
 
-// IsValidArrayElementType returns true if the given type can be used as the
-// element type of an ArrayFamily-typed column. If the valid return is false,
-// the issue number should be included in the error report to inform the user.
-func IsValidArrayElementType(t *T) (valid bool, issueNum int) {
-	switch t.Family() {
-	case JsonFamily:
-		return false, 23468
-	default:
-		return true, 0
-	}
-}
-
-// CheckArrayElementType ensures that the given type can be used as the element
-// type of an ArrayFamily-typed column. If not, it returns an error.
-func CheckArrayElementType(t *T) error {
-	if ok, issueNum := IsValidArrayElementType(t); !ok {
-		return unimplemented.NewWithIssueDetailf(issueNum, t.String(),
-			"arrays of %s not allowed", t)
-	}
-	return nil
-}
-
 // IsDateTimeType returns true if the given type is a date or time-related type.
 func IsDateTimeType(t *T) bool {
 	switch t.Family() {
@@ -2576,7 +2558,7 @@ var unreservedTypeTokens = map[string]*T{
 	"int8":       Int,
 	"int64":      Int,
 	"int2vector": Int2Vector,
-	"json":       Jsonb,
+	"json":       Json,
 	"jsonb":      Jsonb,
 	"name":       Name,
 	"oid":        Oid,

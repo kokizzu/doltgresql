@@ -692,7 +692,12 @@ func (expr *DUuid) Walk(_ Visitor) Expr { return expr }
 func (expr *DIPAddr) Walk(_ Visitor) Expr { return expr }
 
 // Walk implements the Expr interface.
-func (expr dNull) Walk(_ Visitor) Expr { return expr }
+func (d NullLiteral) Walk(_ Visitor) Expr { return d }
+
+// Walk implements the Expr interface.
+func (d DomainColumn) Walk(_ Visitor) Expr {
+	return d
+}
 
 // Walk implements the Expr interface.
 func (expr *DString) Walk(_ Visitor) Expr { return expr }
@@ -1178,7 +1183,6 @@ func (stmt *SelectClause) copyNode() *SelectClause {
 	stmtCopy.Exprs = append(SelectExprs(nil), stmt.Exprs...)
 	stmtCopy.From = From{
 		Tables: append(TableExprs(nil), stmt.From.Tables...),
-		AsOf:   stmt.From.AsOf,
 	}
 	if stmt.Where != nil {
 		wCopy := *stmt.Where
@@ -1204,16 +1208,6 @@ func (stmt *SelectClause) walkStmt(v Visitor) Statement {
 				ret = stmt.copyNode()
 			}
 			ret.Exprs[i].Expr = e
-		}
-	}
-
-	if stmt.From.AsOf.Expr != nil {
-		e, changed := WalkExpr(v, stmt.From.AsOf.Expr)
-		if changed {
-			if ret == stmt {
-				ret = stmt.copyNode()
-			}
-			ret.From.AsOf.Expr = e
 		}
 	}
 
@@ -1277,71 +1271,6 @@ func (stmt *SetVar) walkStmt(v Visitor) Statement {
 				ret = stmt.copyNode()
 			}
 			ret.Values[i] = e
-		}
-	}
-	return ret
-}
-
-// walkStmt is part of the walkableStmt interface.
-func (stmt *SetZoneConfig) walkStmt(v Visitor) Statement {
-	ret := stmt
-	if stmt.YAMLConfig != nil {
-		e, changed := WalkExpr(v, stmt.YAMLConfig)
-		if changed {
-			newStmt := *stmt
-			ret = &newStmt
-			ret.YAMLConfig = e
-		}
-	}
-	if stmt.Options != nil {
-		newOpts, changed := walkKVOptions(v, stmt.Options)
-		if changed {
-			if ret == stmt {
-				newStmt := *stmt
-				ret = &newStmt
-			}
-			ret.Options = newOpts
-		}
-	}
-	return ret
-}
-
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (stmt *SetTracing) copyNode() *SetTracing {
-	stmtCopy := *stmt
-	stmtCopy.Values = append(Exprs(nil), stmt.Values...)
-	return &stmtCopy
-}
-
-// walkStmt is part of the walkableStmt interface.
-func (stmt *SetTracing) walkStmt(v Visitor) Statement {
-	ret := stmt
-	for i, expr := range stmt.Values {
-		e, changed := WalkExpr(v, expr)
-		if changed {
-			if ret == stmt {
-				ret = stmt.copyNode()
-			}
-			ret.Values[i] = e
-		}
-	}
-	return ret
-}
-
-// copyNode makes a copy of this Statement without recursing in any child Statements.
-func (stmt *SetClusterSetting) copyNode() *SetClusterSetting {
-	stmtCopy := *stmt
-	return &stmtCopy
-}
-
-// walkStmt is part of the walkableStmt interface.
-func (stmt *SetClusterSetting) walkStmt(v Visitor) Statement {
-	ret := stmt
-	if stmt.Value != nil {
-		e, changed := WalkExpr(v, stmt.Value)
-		if changed {
-			ret = stmt.copyNode()
-			ret.Value = e
 		}
 	}
 	return ret
@@ -1439,7 +1368,6 @@ var _ walkableStmt = &ParenSelect{}
 var _ walkableStmt = &Restore{}
 var _ walkableStmt = &Select{}
 var _ walkableStmt = &SelectClause{}
-var _ walkableStmt = &SetClusterSetting{}
 var _ walkableStmt = &SetVar{}
 var _ walkableStmt = &Update{}
 var _ walkableStmt = &ValuesClause{}

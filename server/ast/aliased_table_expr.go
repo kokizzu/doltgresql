@@ -16,20 +16,15 @@ package ast
 
 import (
 	"fmt"
-	"sync/atomic"
 
 	vitess "github.com/dolthub/vitess/go/vt/sqlparser"
 
 	"github.com/dolthub/doltgresql/postgres/parser/sem/tree"
+	"github.com/dolthub/doltgresql/server/auth"
 )
 
-// uniqueAliasCounter is used to create unique aliases. Aliases are required by GMS when some expressions are contained
-// within a vitess.AliasedTableExpr. The Postgres AST does not have this restriction, so we must do this for
-// compatibility. Callers are free to change the alias if need be, but we'll always set an alias to be safe.
-var uniqueAliasCounter atomic.Uint64
-
 // nodeAliasedTableExpr handles *tree.AliasedTableExpr nodes.
-func nodeAliasedTableExpr(node *tree.AliasedTableExpr) (*vitess.AliasedTableExpr, error) {
+func nodeAliasedTableExpr(ctx *Context, node *tree.AliasedTableExpr) (*vitess.AliasedTableExpr, error) {
 	if node.Ordinality {
 		return nil, fmt.Errorf("ordinality is not yet supported")
 	}
@@ -37,24 +32,66 @@ func nodeAliasedTableExpr(node *tree.AliasedTableExpr) (*vitess.AliasedTableExpr
 		return nil, fmt.Errorf("index flags are not yet supported")
 	}
 	var aliasExpr vitess.SimpleTableExpr
+	var authInfo vitess.AuthInformation
+
 	switch expr := node.Expr.(type) {
 	case *tree.TableName:
-		var err error
-		aliasExpr, err = nodeTableName(expr)
+		tableName, err := nodeTableName(ctx, expr)
 		if err != nil {
 			return nil, err
 		}
-	default:
-		tableExpr, err := nodeTableExpr(expr)
+		aliasExpr = tableName
+		authInfo = vitess.AuthInformation{
+			AuthType:    ctx.Auth().PeekAuthType(),
+			TargetType:  auth.AuthTargetType_TableIdentifiers,
+			TargetNames: []string{tableName.DbQualifier.String(), tableName.SchemaQualifier.String(), tableName.Name.String()},
+		}
+	case *tree.Subquery:
+		tableExpr, err := nodeTableExpr(ctx, expr)
 		if err != nil {
 			return nil, err
 		}
+
+		ate, ok := tableExpr.(*vitess.AliasedTableExpr)
+		if !ok {
+			return nil, fmt.Errorf("expected *vitess.AliasedTableExpr, found %T", tableExpr)
+		}
+
+		var selectStmt vitess.SelectStatement
+		switch ate.Expr.(type) {
+		case *vitess.Subquery:
+			selectStmt = ate.Expr.(*vitess.Subquery).Select
+		default:
+			return nil, fmt.Errorf("unhandled subquery table expression: `%T`", tableExpr)
+		}
+
+		// If the subquery is a VALUES statement, it should be represented more directly
+		innerSelect := selectStmt
+		if parentSelect, ok := innerSelect.(*vitess.ParenSelect); ok {
+			innerSelect = parentSelect.Select
+		}
+		if inSelect, ok := innerSelect.(*vitess.Select); ok {
+			if len(inSelect.From) == 1 {
+				if aliasedTblExpr, ok := inSelect.From[0].(*vitess.AliasedTableExpr); ok {
+					if valuesStmt, ok := aliasedTblExpr.Expr.(*vitess.ValuesStatement); ok {
+						if len(node.As.Cols) > 0 {
+							columns := make([]vitess.ColIdent, len(node.As.Cols))
+							for i := range node.As.Cols {
+								columns[i] = vitess.NewColIdent(string(node.As.Cols[i]))
+							}
+							valuesStmt.Columns = columns
+						}
+						aliasExpr = valuesStmt
+						break
+					}
+				}
+			}
+		}
+
 		subquery := &vitess.Subquery{
-			Select: &vitess.Select{
-				From: vitess.TableExprs{tableExpr},
-			},
+			Select: selectStmt,
 		}
-		//TODO: make sure that this actually works
+
 		if len(node.As.Cols) > 0 {
 			columns := make([]vitess.ColIdent, len(node.As.Cols))
 			for i := range node.As.Cols {
@@ -63,20 +100,49 @@ func nodeAliasedTableExpr(node *tree.AliasedTableExpr) (*vitess.AliasedTableExpr
 			subquery.Columns = columns
 		}
 		aliasExpr = subquery
+	case *tree.RowsFromExpr:
+		tableExpr, err := nodeTableExpr(ctx, expr)
+		if err != nil {
+			return nil, err
+		}
+
+		// TODO: this should be represented as a table function more directly
+		subquery := &vitess.Subquery{
+			Select: &vitess.Select{
+				From: vitess.TableExprs{tableExpr},
+			},
+		}
+
+		if len(node.As.Cols) > 0 {
+			columns := make([]vitess.ColIdent, len(node.As.Cols))
+			for i := range node.As.Cols {
+				columns[i] = vitess.NewColIdent(string(node.As.Cols[i]))
+			}
+			subquery.Columns = columns
+		}
+		aliasExpr = subquery
+	default:
+		return nil, fmt.Errorf("unhandled table expression: `%T`", expr)
 	}
 	alias := string(node.As.Alias)
-	if len(alias) == 0 {
-		alias = generateUniqueAlias()
+
+	var asOf *vitess.AsOf
+	if node.AsOf != nil {
+		asOfExpr, err := nodeExpr(ctx, node.AsOf.Expr)
+		if err != nil {
+			return nil, err
+		}
+		// TODO: other forms of AS OF (not just point in time)
+		asOf = &vitess.AsOf{
+			Time: asOfExpr,
+		}
 	}
+
 	return &vitess.AliasedTableExpr{
 		Expr:    aliasExpr,
 		As:      vitess.NewTableIdent(alias),
-		AsOf:    nil,
+		AsOf:    asOf,
 		Lateral: node.Lateral,
+		Auth:    authInfo,
 	}, nil
-}
-
-// generateUniqueAlias generates a unique alias. This is thread-safe.
-func generateUniqueAlias() string {
-	return fmt.Sprintf("doltgres!|alias|%d", uniqueAliasCounter.Add(1))
 }

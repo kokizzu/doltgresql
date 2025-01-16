@@ -18,69 +18,31 @@ import (
 	"fmt"
 
 	vitess "github.com/dolthub/vitess/go/vt/sqlparser"
-	"github.com/sirupsen/logrus"
 
 	"github.com/dolthub/doltgresql/postgres/parser/sem/tree"
 )
 
 // nodeIndexTableDef handles *tree.IndexTableDef nodes. The parser does not store type information in the index
 // definition (PRIMARY KEY, UNIQUE, etc.) so it must be added to this definition by the caller.
-func nodeIndexTableDef(node *tree.IndexTableDef) (*vitess.IndexDefinition, error) {
+func nodeIndexTableDef(ctx *Context, node *tree.IndexTableDef) (*vitess.IndexDefinition, error) {
 	if node == nil {
 		return nil, nil
 	}
-	if node.Sharded != nil {
-		return nil, fmt.Errorf("sharding is not yet supported")
+	if node.IndexParams.IncludeColumns != nil {
+		return nil, fmt.Errorf("include columns is not yet supported")
 	}
-	if len(node.Storing) > 0 {
-		return nil, fmt.Errorf("INCLUDE is not yet supported")
+	if len(node.IndexParams.StorageParams) > 0 {
+		return nil, fmt.Errorf("storage parameters is not yet supported")
 	}
-	if node.Interleave != nil {
-		return nil, fmt.Errorf("INTERLEAVE is not yet supported")
+	if node.IndexParams.Tablespace != "" {
+		return nil, fmt.Errorf("tablespace is not yet supported")
 	}
-	if node.Inverted {
-		return nil, fmt.Errorf("inverted indexes are not yet supported")
+
+	columns, err := nodeIndexElemList(ctx, node.Columns)
+	if err != nil {
+		return nil, err
 	}
-	if node.PartitionBy != nil {
-		return nil, fmt.Errorf("PARTITION BY is not yet supported")
-	}
-	if len(node.StorageParams) > 0 {
-		return nil, fmt.Errorf("storage parameters are not yet supported")
-	}
-	if node.Predicate != nil {
-		return nil, fmt.Errorf("WHERE is not yet supported")
-	}
-	columns := make([]*vitess.IndexColumn, len(node.Columns))
-	for i, indexElem := range node.Columns {
-		switch indexElem.Direction {
-		case tree.DefaultDirection:
-			// Defaults to ASC
-		case tree.Ascending:
-			// The only default supported in GMS for now
-		case tree.Descending:
-			logrus.Warn("descending indexes are not yet supported, ignoring sort order")
-		default:
-			return nil, fmt.Errorf("unknown index sorting direction encountered")
-		}
-		if indexElem.Direction != tree.Ascending {
-			logrus.Warn("descending indexes are not yet supported, ignoring sort order")
-		}
-		switch indexElem.NullsOrder {
-		case tree.DefaultNullsOrder:
-			//TODO: the default NULL order is reversed compared to MySQL, so the default is technically always wrong.
-			// To prevent choking on every index, we allow this to proceed (even with incorrect results) for now.
-		case tree.NullsFirst:
-			// The only form supported in GMS for now
-		case tree.NullsLast:
-			return nil, fmt.Errorf("NULLS LAST for indexes is not yet supported")
-		default:
-			return nil, fmt.Errorf("unknown NULL ordering for index")
-		}
-		columns[i] = &vitess.IndexColumn{
-			Column: vitess.NewColIdent(string(indexElem.Column)),
-			Order:  vitess.AscScr,
-		}
-	}
+
 	return &vitess.IndexDefinition{
 		Info: &vitess.IndexInfo{
 			Type: "",

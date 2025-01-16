@@ -23,15 +23,15 @@ import (
 )
 
 // nodeFuncExpr handles *tree.FuncExpr nodes.
-func nodeFuncExpr(node *tree.FuncExpr) (*vitess.FuncExpr, error) {
+func nodeFuncExpr(ctx *Context, node *tree.FuncExpr) (*vitess.FuncExpr, error) {
 	if node == nil {
 		return nil, nil
 	}
 	if node.Filter != nil {
 		return nil, fmt.Errorf("function filters are not yet supported")
 	}
-	if node.AggType != tree.GeneralAgg {
-		return nil, fmt.Errorf("function aggregation is not yet supported")
+	if node.AggType == tree.OrderedSetAgg {
+		return nil, fmt.Errorf("WITHIN GROUP is not yet supported")
 	}
 	if len(node.OrderBy) > 0 {
 		return nil, fmt.Errorf("function ORDER BY is not yet supported")
@@ -54,18 +54,18 @@ func nodeFuncExpr(node *tree.FuncExpr) (*vitess.FuncExpr, error) {
 	}
 	var distinct bool
 	switch node.Type {
-	case 0:
+	case 0, tree.AllFuncType:
 		distinct = false
 	case tree.DistinctFuncType:
 		distinct = true
-	case tree.AllFuncType:
-		return nil, fmt.Errorf("function spec is not yet supported")
+	default:
+		return nil, fmt.Errorf("unknown function spec type %d", node.Type)
 	}
-	windowDef, err := nodeWindowDef(node.WindowDef)
+	windowDef, err := nodeWindowDef(ctx, node.WindowDef)
 	if err != nil {
 		return nil, err
 	}
-	exprs, err := nodeExprsToSelectExprs(node.Exprs)
+	exprs, err := nodeExprsToSelectExprs(ctx, node.Exprs)
 	if err != nil {
 		return nil, err
 	}

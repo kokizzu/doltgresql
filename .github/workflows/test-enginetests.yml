@@ -1,0 +1,28 @@
+name: Enginetests
+on: [pull_request]
+
+concurrency:
+  group: test-enginetests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+      id: go
+    - name: Build SQL Syntax
+      run: ./build.sh
+      working-directory: ./postgres/parser
+      shell: bash
+    - name: Test
+      run: go test $(go list ./testing/go/enginetest)

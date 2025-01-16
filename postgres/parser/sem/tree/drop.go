@@ -53,11 +53,50 @@ func (d DropBehavior) String() string {
 	return dropBehaviorName[d]
 }
 
-// DropDatabase represents a DROP DATABASE statement.
-type DropDatabase struct {
-	Name         Name
+var _ Statement = &DropAggregate{}
+
+// DropAggregate represents a DROP AGGREGATE statement.
+type DropAggregate struct {
+	Aggregates   []AggregateToDrop
 	IfExists     bool
 	DropBehavior DropBehavior
+}
+
+type AggregateToDrop struct {
+	Name   *UnresolvedObjectName
+	AggSig *AggregateSignature
+}
+
+// Format implements the NodeFormatter interface.
+func (node *DropAggregate) Format(ctx *FmtCtx) {
+	ctx.WriteString("DROP AGGREGATE ")
+	if node.IfExists {
+		ctx.WriteString("IF EXISTS ")
+	}
+	for i, agg := range node.Aggregates {
+		if i != 0 {
+			ctx.WriteString(" , ")
+		}
+		ctx.FormatNode(agg.Name)
+		ctx.WriteString(" ( ")
+		ctx.FormatNode(agg.AggSig)
+		ctx.WriteString(" ) ")
+	}
+	switch node.DropBehavior {
+	case DropDefault:
+	default:
+		ctx.WriteByte(' ')
+		ctx.WriteString(dropBehaviorName[node.DropBehavior])
+	}
+}
+
+var _ Statement = &DropDatabase{}
+
+// DropDatabase represents a DROP DATABASE statement.
+type DropDatabase struct {
+	Name     Name
+	IfExists bool
+	Force    bool
 }
 
 // Format implements the NodeFormatter interface.
@@ -67,11 +106,104 @@ func (node *DropDatabase) Format(ctx *FmtCtx) {
 		ctx.WriteString("IF EXISTS ")
 	}
 	ctx.FormatNode(&node.Name)
-	if node.DropBehavior != DropDefault {
-		ctx.WriteByte(' ')
-		ctx.WriteString(node.DropBehavior.String())
+	if node.Force {
+		ctx.WriteString(" WITH ( FORCE )")
 	}
 }
+
+var _ Statement = &DropDomain{}
+
+// DropDomain represents a DROP DOMAIN statement.
+type DropDomain struct {
+	Names        TableNames
+	IfExists     bool
+	DropBehavior DropBehavior
+}
+
+// Format implements the NodeFormatter interface.
+func (node *DropDomain) Format(ctx *FmtCtx) {
+	ctx.WriteString("DROP DATABASE ")
+	if node.IfExists {
+		ctx.WriteString("IF EXISTS ")
+	}
+	ctx.FormatNode(&node.Names)
+	switch node.DropBehavior {
+	case DropDefault:
+	default:
+		ctx.WriteByte(' ')
+		ctx.WriteString(dropBehaviorName[node.DropBehavior])
+	}
+}
+
+var _ Statement = &DropExtension{}
+
+// DropExtension represents a DROP EXTENSION statement.
+type DropExtension struct {
+	Names        NameList
+	IfExists     bool
+	DropBehavior DropBehavior
+}
+
+// Format implements the NodeFormatter interface.
+func (node *DropExtension) Format(ctx *FmtCtx) {
+	ctx.WriteString("DROP EXTENSION ")
+	if node.IfExists {
+		ctx.WriteString("IF EXISTS ")
+	}
+	ctx.FormatNode(&node.Names)
+	switch node.DropBehavior {
+	case DropDefault:
+	default:
+		ctx.WriteByte(' ')
+		ctx.WriteString(dropBehaviorName[node.DropBehavior])
+	}
+}
+
+var _ Statement = &DropFunction{}
+
+// DropFunction represents a DROP FUNCTION statement.
+type DropFunction struct {
+	Functions    []RoutineWithArgs
+	IfExists     bool
+	DropBehavior DropBehavior
+}
+
+// Format implements the NodeFormatter interface.
+func (node *DropFunction) Format(ctx *FmtCtx) {
+	ctx.WriteString("DROP FUNCTION ")
+	if node.IfExists {
+		ctx.WriteString("IF EXISTS ")
+	}
+	for i, f := range node.Functions {
+		if i != 0 {
+			ctx.WriteString(", ")
+		}
+		ctx.FormatNode(&f)
+	}
+	switch node.DropBehavior {
+	case DropDefault:
+	default:
+		ctx.WriteByte(' ')
+		ctx.WriteString(dropBehaviorName[node.DropBehavior])
+	}
+}
+
+// RoutineWithArgs represents the routine name and its arguments, if any, for DROP { FUNCTION | PROCEDURE } statement.
+type RoutineWithArgs struct {
+	Name *UnresolvedObjectName
+	Args RoutineArgs
+}
+
+func (node *RoutineWithArgs) Format(ctx *FmtCtx) {
+	ctx.FormatNode(node.Name)
+	ctx.WriteString(" (")
+	if len(node.Args) != 0 {
+		node.Args.Format(ctx)
+	}
+	ctx.WriteString(" )")
+}
+
+var _ Statement = &DropIndex{}
 
 // DropIndex represents a DROP INDEX statement.
 type DropIndex struct {
@@ -97,6 +229,64 @@ func (node *DropIndex) Format(ctx *FmtCtx) {
 	}
 }
 
+var _ Statement = &DropLanguage{}
+
+// DropLanguage represents a DROP LANGUAGE statement.
+type DropLanguage struct {
+	Name         Name
+	Procedural   bool
+	IfExists     bool
+	DropBehavior DropBehavior
+}
+
+// Format implements the NodeFormatter interface.
+func (node *DropLanguage) Format(ctx *FmtCtx) {
+	ctx.WriteString("DROP ")
+	if node.Procedural {
+		ctx.WriteString("PROCEDURAL ")
+	}
+	ctx.WriteString("LANGUAGE ")
+	if node.IfExists {
+		ctx.WriteString("IF EXISTS ")
+	}
+	ctx.FormatNode(&node.Name)
+	if node.DropBehavior != DropDefault {
+		ctx.WriteByte(' ')
+		ctx.WriteString(node.DropBehavior.String())
+	}
+}
+
+var _ Statement = &DropProcedure{}
+
+// DropProcedure represents a DROP PROCEDURE statement.
+type DropProcedure struct {
+	Procedures   []RoutineWithArgs
+	IfExists     bool
+	DropBehavior DropBehavior
+}
+
+// Format implements the NodeFormatter interface.
+func (node *DropProcedure) Format(ctx *FmtCtx) {
+	ctx.WriteString("DROP PROCEDURE ")
+	if node.IfExists {
+		ctx.WriteString("IF EXISTS ")
+	}
+	for i, f := range node.Procedures {
+		if i != 0 {
+			ctx.WriteString(", ")
+		}
+		ctx.FormatNode(&f)
+	}
+	switch node.DropBehavior {
+	case DropDefault:
+	default:
+		ctx.WriteByte(' ')
+		ctx.WriteString(dropBehaviorName[node.DropBehavior])
+	}
+}
+
+var _ Statement = &DropTable{}
+
 // DropTable represents a DROP TABLE statement.
 type DropTable struct {
 	Names        TableNames
@@ -116,6 +306,35 @@ func (node *DropTable) Format(ctx *FmtCtx) {
 		ctx.WriteString(node.DropBehavior.String())
 	}
 }
+
+var _ Statement = &DropTrigger{}
+
+// DropTrigger represents a DROP TRIGGER statement.
+type DropTrigger struct {
+	Name         Name
+	IfExists     bool
+	OnTable      TableName
+	DropBehavior DropBehavior
+}
+
+// Format implements the NodeFormatter interface.
+func (node *DropTrigger) Format(ctx *FmtCtx) {
+	ctx.WriteString("DROP TRIGGER ")
+	if node.IfExists {
+		ctx.WriteString("IF EXISTS ")
+	}
+	ctx.FormatNode(&node.Name)
+	ctx.WriteString(" ON ")
+	ctx.FormatNode(&node.OnTable)
+	switch node.DropBehavior {
+	case DropDefault:
+	default:
+		ctx.WriteByte(' ')
+		ctx.WriteString(dropBehaviorName[node.DropBehavior])
+	}
+}
+
+var _ Statement = &DropView{}
 
 // DropView represents a DROP VIEW statement.
 type DropView struct {
@@ -142,6 +361,8 @@ func (node *DropView) Format(ctx *FmtCtx) {
 	}
 }
 
+var _ Statement = &DropSequence{}
+
 // DropSequence represents a DROP SEQUENCE statement.
 type DropSequence struct {
 	Names        TableNames
@@ -161,6 +382,8 @@ func (node *DropSequence) Format(ctx *FmtCtx) {
 		ctx.WriteString(node.DropBehavior.String())
 	}
 }
+
+var _ Statement = &DropRole{}
 
 // DropRole represents a DROP ROLE statement
 type DropRole struct {

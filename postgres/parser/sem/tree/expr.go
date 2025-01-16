@@ -141,6 +141,10 @@ type typeAnnotation struct {
 	typ *types.T
 }
 
+func (ta typeAnnotation) HasResolvedType() bool {
+	return ta.typ != nil
+}
+
 func (ta typeAnnotation) ResolvedType() *types.T {
 	ta.assertTyped()
 	return ta.typ
@@ -383,6 +387,7 @@ const (
 	NotRegMatch
 	RegIMatch
 	NotRegIMatch
+	TextSearchMatch
 	IsDistinctFrom
 	IsNotDistinctFrom
 	Contains
@@ -434,6 +439,7 @@ var comparisonOpName = [...]string{
 	NotRegMatch:       "!~",
 	RegIMatch:         "~*",
 	NotRegIMatch:      "!~*",
+	TextSearchMatch:   "@@",
 	IsDistinctFrom:    "IS DISTINCT FROM",
 	IsNotDistinctFrom: "IS NOT DISTINCT FROM",
 	Contains:          "@>",
@@ -1200,25 +1206,6 @@ func (node *BinaryExpr) memoizeFn() {
 	node.Fn = fn
 }
 
-// newBinExprIfValidOverload constructs a new BinaryExpr if and only
-// if the pair of arguments have a valid implementation for the given
-// BinaryOperator.
-func newBinExprIfValidOverload(op BinaryOperator, left TypedExpr, right TypedExpr) *BinaryExpr {
-	leftRet, rightRet := left.ResolvedType(), right.ResolvedType()
-	fn, ok := BinOps[op].lookupImpl(leftRet, rightRet)
-	if ok {
-		expr := &BinaryExpr{
-			Operator: op,
-			Left:     left,
-			Right:    right,
-			Fn:       fn,
-		}
-		expr.typ = returnTypeToFixedType(fn.returnType())
-		return expr
-	}
-	return nil
-}
-
 // Format implements the NodeFormatter interface.
 func (node *BinaryExpr) Format(ctx *FmtCtx) {
 	binExprFmtWithParen(ctx, node.Left, node.Operator.String(), node.Right, node.Operator.isPadded())
@@ -1235,6 +1222,7 @@ const (
 	UnaryComplement
 	UnarySqrt
 	UnaryCbrt
+	UnaryAbsolute
 
 	NumUnaryOperators
 )
@@ -1246,6 +1234,7 @@ var unaryOpName = [...]string{
 	UnaryComplement: "~",
 	UnarySqrt:       "|/",
 	UnaryCbrt:       "||/",
+	UnaryAbsolute:   "@",
 }
 
 func (i UnaryOperator) String() string {
@@ -1401,25 +1390,12 @@ const (
 
 // Format implements the NodeFormatter interface.
 func (node *FuncExpr) Format(ctx *FmtCtx) {
-	var typ string
-	if node.Type != 0 {
-		typ = funcTypeName[node.Type] + " "
-	}
-
 	// We need to remove name anonymization for the function name in
 	// particular. Do this by overriding the flags.
 	ctx.WithFlags(ctx.flags&^FmtAnonymize, func() {
 		ctx.FormatNode(&node.Func)
 	})
 
-	ctx.WriteByte('(')
-	ctx.WriteString(typ)
-	ctx.FormatNode(&node.Exprs)
-	if node.AggType == GeneralAgg && len(node.OrderBy) > 0 {
-		ctx.WriteByte(' ')
-		ctx.FormatNode(&node.OrderBy)
-	}
-	ctx.WriteByte(')')
 	if ctx.HasFlags(FmtParsable) && node.typ != nil {
 		if node.fnProps.AmbiguousReturnType {
 			// There's no type annotation available for tuples.
@@ -1431,6 +1407,18 @@ func (node *FuncExpr) Format(ctx *FmtCtx) {
 			}
 		}
 	}
+
+	if !ctx.HasFlags(FmtOmitFunctionArgs) {
+		ctx.WriteString("(")
+		for i, e := range node.Exprs {
+			if i > 0 {
+				ctx.WriteString(", ")
+			}
+			ctx.FormatNode(e)
+		}
+		ctx.WriteString(")")
+	}
+
 	if node.AggType == OrderedSetAgg && len(node.OrderBy) > 0 {
 		ctx.WriteString(" WITHIN GROUP (")
 		ctx.FormatNode(&node.OrderBy)
@@ -1776,5 +1764,6 @@ func (node DefaultVal) String() string        { return AsString(node) }
 func (node PartitionMaxVal) String() string   { return AsString(node) }
 func (node PartitionMinVal) String() string   { return AsString(node) }
 func (node *Placeholder) String() string      { return AsString(node) }
-func (node dNull) String() string             { return AsString(node) }
+func (d NullLiteral) String() string          { return AsString(d) }
+func (d DomainColumn) String() string         { return AsString(d) }
 func (list *NameList) String() string         { return AsString(list) }

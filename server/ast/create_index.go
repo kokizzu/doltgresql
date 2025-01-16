@@ -16,6 +16,7 @@ package ast
 
 import (
 	"fmt"
+	"strings"
 
 	vitess "github.com/dolthub/vitess/go/vt/sqlparser"
 
@@ -23,28 +24,28 @@ import (
 )
 
 // nodeCreateIndex handles *tree.CreateIndex nodes.
-func nodeCreateIndex(node *tree.CreateIndex) (*vitess.AlterTable, error) {
+func nodeCreateIndex(ctx *Context, node *tree.CreateIndex) (*vitess.AlterTable, error) {
 	if node == nil {
 		return nil, nil
 	}
 	if node.Concurrently {
 		return nil, fmt.Errorf("concurrent indexes are not yet supported")
 	}
-	indexDef, err := nodeIndexTableDef(&tree.IndexTableDef{
-		Name:          node.Name,
-		Columns:       node.Columns,
-		Sharded:       node.Sharded,
-		Storing:       node.Storing,
-		Interleave:    node.Interleave,
-		Inverted:      node.Inverted,
-		PartitionBy:   node.PartitionBy,
-		StorageParams: node.StorageParams,
-		Predicate:     node.Predicate,
+	if node.Using != "" && strings.ToLower(node.Using) != "btree" {
+		return nil, fmt.Errorf("index tablespace is not yet supported")
+	}
+	if node.Predicate != nil {
+		return nil, fmt.Errorf("WHERE is not yet supported")
+	}
+	indexDef, err := nodeIndexTableDef(ctx, &tree.IndexTableDef{
+		Name:        node.Name,
+		Columns:     node.Columns,
+		IndexParams: node.IndexParams,
 	})
 	if err != nil {
 		return nil, err
 	}
-	tableName, err := nodeTableName(&node.Table)
+	tableName, err := nodeTableName(ctx, &node.Table)
 	if err != nil {
 		return nil, err
 	}

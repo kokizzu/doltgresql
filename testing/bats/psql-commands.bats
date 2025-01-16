@@ -3,6 +3,7 @@ load $BATS_TEST_DIRNAME/setup/common.bash
 
 setup() {
     setup_common
+    start_sql_server
     query_server <<SQL
     CREATE TABLE test1 (pk BIGINT PRIMARY KEY, v1 SMALLINT);
     CREATE TABLE test2 (pk BIGINT PRIMARY KEY, v1 INTEGER, v2 SMALLINT);
@@ -19,13 +20,12 @@ teardown() {
 @test 'psql-commands: \l' {
     run query_server -c "\l"
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "information_schema" ]] || false
     [[ "$output" =~ "postgres" ]] || false
-    [[ "$output" =~ "doltgres" ]] || false
 }
 
 @test 'psql-commands: \dt' {
     run query_server --csv -c "\dt"
+    echo "$output"
     [ "$status" -eq 0 ]
     [[ "$output" =~ "public,test1,table,postgres" ]] || false
     [[ "$output" =~ "public,test2,table,postgres" ]] || false
@@ -37,7 +37,8 @@ teardown() {
     [ "$status" -eq 0 ]
     [[ "$output" =~ "public,test1,table,postgres" ]] || false
     [[ "$output" =~ "public,test2,table,postgres" ]] || false
-    [ "${#lines[@]}" -eq 3 ]
+    [[ "$output" =~ "public,testview,view,postgres" ]] || false
+    [ "${#lines[@]}" -eq 4 ]
 }
 
 @test 'psql-commands: \d table' {
@@ -58,7 +59,6 @@ teardown() {
 }
 
 @test 'psql-commands: \dv' {
-    skip "need to reimplement CREATE VIEW support"
     run query_server --csv -c "\dv"
     [ "$status" -eq 0 ]
     [[ "$output" =~ "public,testview,view,postgres" ]] || false

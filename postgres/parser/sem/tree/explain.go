@@ -34,12 +34,20 @@ import (
 	"github.com/dolthub/doltgresql/postgres/parser/pgerror"
 )
 
+var _ Statement = &Explain{}
+
 // Explain represents an EXPLAIN statement.
 type Explain struct {
 	ExplainOptions
 
 	// Statement is the statement being EXPLAINed.
 	Statement Statement
+
+	// TableName is the alternate form of EXPLAIN, which describes the schema of a table
+	TableName *UnresolvedObjectName
+
+	// AsOf is the point in time for EXPLAIN, only valid for TableName
+	AsOf *AsOfClause
 }
 
 // ExplainOptions contains information about the options passed to an EXPLAIN
@@ -107,16 +115,30 @@ const (
 	ExplainFlagEnv
 	ExplainFlagCatalog
 	ExplainFlagDebug
+	ExplainFlagCosts
+	ExplainFlagSettings
+	ExplainFlagBuffers
+	ExplainFlagWAL
+	ExplainFlagTiming
+	ExplainFlagSummary
+	ExplainFlagFormat
 	numExplainFlags = iota
 )
 
 var explainFlagStrings = [...]string{
-	ExplainFlagVerbose: "VERBOSE",
-	ExplainFlagTypes:   "TYPES",
-	ExplainFlagAnalyze: "ANALYZE",
-	ExplainFlagEnv:     "ENV",
-	ExplainFlagCatalog: "CATALOG",
-	ExplainFlagDebug:   "DEBUG",
+	ExplainFlagVerbose:  "VERBOSE",
+	ExplainFlagTypes:    "TYPES",
+	ExplainFlagAnalyze:  "ANALYZE",
+	ExplainFlagEnv:      "ENV",
+	ExplainFlagCatalog:  "CATALOG",
+	ExplainFlagDebug:    "DEBUG",
+	ExplainFlagCosts:    "COSTS",
+	ExplainFlagSettings: "SETTINGS",
+	ExplainFlagBuffers:  "BUFFERS",
+	ExplainFlagWAL:      "WAL",
+	ExplainFlagTiming:   "TIMING",
+	ExplainFlagSummary:  "SUMMARY",
+	ExplainFlagFormat:   "FORMAT",
 }
 
 var explainFlagStringMap = func() map[string]ExplainFlag {

@@ -12,9 +12,10 @@ wait_for_connection() {
   timeout=$2
   user=${SQL_USER:-postgres}
   end_time=$((SECONDS+($timeout/1000)))
+  nativevar PGPASSWORD "password" /w
 
   while [ $SECONDS -lt $end_time ]; do
-    run psql -U $user -h localhost -p $port -c "SELECT 1;"
+    run psql -U $user -h localhost -p $port -c "SELECT 1;" postgres
     if [ $status -eq 0 ]; then
       echo "Connected successfully!"
       return 0
@@ -29,81 +30,33 @@ wait_for_connection() {
 start_sql_server() {
     DEFAULT_DB="$1"
     DEFAULT_DB="${DEFAULT_DB:=postgres}"
+    nativevar PGPASSWORD "password" /w
+    nativevar DEFAULT_DB "$DEFAULT_DB" /w
     logFile="$2"
     PORT=$( definePORT )
+    CONFIG=$( defineCONFIG $PORT )
+    echo "$CONFIG" > config.yaml
     if [[ $logFile ]]
     then
-        doltgresql --host 0.0.0.0 --port=$PORT --user "${SQL_USER:-postgres}" > $logFile 2>&1 &
+        doltgres -data-dir=. -config=config.yaml> $logFile 2>&1 &
     else
-        doltgresql --host 0.0.0.0 --port=$PORT --user "${SQL_USER:-postgres}" &
+        doltgres -data-dir=. -config=config.yaml &
     fi
     SERVER_PID=$!
     wait_for_connection $PORT 7500
 }
 
-# like start_sql_server, but the second argument is a string with all
-# arguments to dolt-sql-server (excluding --port, which is defined in
-# this func)
+# like start_sql_server, but the second argument is a string with all arguments to doltgres. The
+# port argument is handled separately: if the variable $PORT is not defined and the --port argument
+# is not included in the argument list, a random port is chosen for $PORT and the argument --port is
+# appended to the argument list.
 start_sql_server_with_args() {
     DEFAULT_DB=""
-    PORT=$( definePORT )
-    doltgresql "$@" --port=$PORT &
-    SERVER_PID=$!
-    wait_for_connection $PORT 7500
-}
+    nativevar DEFAULT_DB "$DEFAULT_DB" /w
+    nativevar PGPASSWORD "password" /w
 
-start_sql_server_with_config() {
-    DEFAULT_DB="$1"
-    DEFAULT_DB="${DEFAULT_DB:=postgres}"
-    PORT=$( definePORT )
-    echo "
-log_level: debug
-
-user:
-  name: postgres
-
-listener:
-  host: 0.0.0.0
-  port: $PORT
-  max_connections: 10
-
-behavior:
-  autocommit: false
-" > .cliconfig.yaml
-    cat "$2" >> .cliconfig.yaml
-    doltgresql --config .cliconfig.yaml &
-    SERVER_PID=$!
-    wait_for_connection $PORT 7500
-}
-
-start_sql_multi_user_server() {
-    DEFAULT_DB="$1"
-    DEFAULT_DB="${DEFAULT_DB:=postgres}"
-    PORT=$( definePORT )
-    echo "
-log_level: debug
-
-user:
-  name: postgres
-
-listener:
-  host: 0.0.0.0
-  port: $PORT
-  max_connections: 10
-
-behavior:
-  autocommit: false
-" > .cliconfig.yaml
-    doltgresql --config .cliconfig.yaml &
-    SERVER_PID=$!
-    wait_for_connection $PORT 7500
-}
-
-start_multi_db_server() {
-    DEFAULT_DB="$1"
-    DEFAULT_DB="${DEFAULT_DB:=postgres}"
-    PORT=$( definePORT )
-    doltgresql --host 0.0.0.0 --port=$PORT --user postgres --data-dir ./ &
+    echo "running doltgres $@"
+    doltgres "$@" &
     SERVER_PID=$!
     wait_for_connection $PORT 7500
 }
@@ -129,6 +82,7 @@ stop_sql_server() {
         fi;
     fi
     SERVER_PID=
+    PORT=
 }
 
 definePORT() {
@@ -142,4 +96,24 @@ definePORT() {
       break
     fi
   done
+}
+
+defineCONFIG() {
+    PORT=$1
+    cat <<EOF
+    log_level: debug
+
+    behavior:
+      read_only: false
+      disable_client_multi_statements: false
+      dolt_transaction_commit: false
+
+    user:
+      name: "postgres"
+      password: "password"
+
+    listener:
+      host: localhost
+      port: $PORT
+EOF
 }

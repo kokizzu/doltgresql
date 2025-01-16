@@ -15,17 +15,28 @@
 package ast
 
 import (
-	"fmt"
-
 	vitess "github.com/dolthub/vitess/go/vt/sqlparser"
+
+	"github.com/dolthub/doltgresql/server/auth"
 
 	"github.com/dolthub/doltgresql/postgres/parser/sem/tree"
 )
 
 // nodeCreateSchema handles *tree.CreateSchema nodes.
-func nodeCreateSchema(node *tree.CreateSchema) (vitess.Statement, error) {
+func nodeCreateSchema(ctx *Context, node *tree.CreateSchema) (vitess.Statement, error) {
 	if node == nil {
 		return nil, nil
 	}
-	return nil, fmt.Errorf("CREATE SCHEMA is not yet supported")
+	return &vitess.DBDDL{
+		Action:           "CREATE",
+		SchemaOrDatabase: "schema",
+		DBName:           node.Schema,
+		IfNotExists:      node.IfNotExists,
+		CharsetCollate:   nil, // TODO
+		Auth: vitess.AuthInformation{
+			AuthType:    auth.AuthType_CREATE,
+			TargetType:  auth.AuthTargetType_DatabaseIdentifiers,
+			TargetNames: []string{""},
+		},
+	}, nil
 }

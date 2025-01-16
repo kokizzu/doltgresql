@@ -1671,7 +1671,12 @@ func (d *DOidWrapper) TypeCheck(_ context.Context, _ *SemaContext, _ *types.T) (
 
 // TypeCheck implements the Expr interface. It is implemented as an idempotent
 // identity function for Datum.
-func (d dNull) TypeCheck(_ context.Context, _ *SemaContext, desired *types.T) (TypedExpr, error) {
+func (d NullLiteral) TypeCheck(_ context.Context, _ *SemaContext, desired *types.T) (TypedExpr, error) {
+	return d, nil
+}
+
+// TypeCheck implements the Expr interface.
+func (d DomainColumn) TypeCheck(ctx context.Context, semaCtx *SemaContext, desired *types.T) (TypedExpr, error) {
 	return d, nil
 }
 

@@ -15,6 +15,7 @@
 package harness
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -23,16 +24,11 @@ import (
 	_ "github.com/jackc/pgx/v4/stdlib"
 )
 
-var _ logictest.Harness = &PostgresqlServerHarness{}
-
-const (
-	name  = "sqllogictest runner"
-	email = "sqllogictestrunner@dolthub.com"
-)
-
 // sqllogictest harness for postgres databases.
 type PostgresqlServerHarness struct {
-	db *sql.DB
+	dsn     string
+	db      *sql.DB
+	timeout int64
 }
 
 // compile check for interface compliance
@@ -40,12 +36,16 @@ var _ logictest.Harness = &PostgresqlServerHarness{}
 
 // NewPostgresqlHarness returns a new Postgres test harness for the data source name given. Panics if it cannot open a
 // connection using the DSN.
-func NewPostgresqlHarness(dsn string) *PostgresqlServerHarness {
+func NewPostgresqlHarness(dsn string, t int64) *PostgresqlServerHarness {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		panic(err)
 	}
-	return &PostgresqlServerHarness{db: db}
+	return &PostgresqlServerHarness{
+		dsn:     dsn,
+		db:      db,
+		timeout: t,
+	}
 }
 
 func (h *PostgresqlServerHarness) EngineStr() string {
@@ -69,10 +69,36 @@ func (h *PostgresqlServerHarness) ExecuteStatement(statement string) error {
 // See Harness.ExecuteQuery
 func (h *PostgresqlServerHarness) ExecuteQuery(statement string) (schema string, results []string, err error) {
 	rows, err := h.db.Query(statement)
+	if rows != nil {
+		defer rows.Close()
+	}
+
 	if err != nil {
 		return "", nil, err
 	}
 
+	return h.getSchemaAndResults(rows)
+}
+
+func (h *PostgresqlServerHarness) ExecuteStatementContext(ctx context.Context, statement string) error {
+	_, err := h.db.ExecContext(ctx, statement)
+	return err
+}
+
+func (h *PostgresqlServerHarness) ExecuteQueryContext(ctx context.Context, statement string) (schema string, results []string, err error) {
+	rows, err := h.db.QueryContext(ctx, statement)
+	if rows != nil {
+		defer rows.Close()
+	}
+
+	if err != nil {
+		return "", nil, err
+	}
+
+	return h.getSchemaAndResults(rows)
+}
+
+func (h *PostgresqlServerHarness) getSchemaAndResults(rows *sql.Rows) (schema string, results []string, err error) {
 	schema, columns, err := columns(rows)
 	if err != nil {
 		return "", nil, err
@@ -96,8 +122,17 @@ func (h *PostgresqlServerHarness) ExecuteQuery(statement string) (schema string,
 	return schema, results, nil
 }
 
+func (h *PostgresqlServerHarness) GetTimeout() int64 {
+	return h.timeout
+}
+
 func (h *PostgresqlServerHarness) dropAllTables() error {
-	rows, err := h.db.Query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'sqllogictest' AND table_type = 'BASE TABLE';")
+	var rows *sql.Rows
+	var err error
+	rows, err = h.db.QueryContext(context.Background(), "SELECT table_name FROM information_schema.tables WHERE table_schema = 'sqllogictest' AND table_type = 'BASE TABLE';")
+	if rows != nil {
+		defer rows.Close()
+	}
 	if err != nil {
 		return err
 	}
@@ -130,7 +165,10 @@ func (h *PostgresqlServerHarness) dropAllTables() error {
 }
 
 func (h *PostgresqlServerHarness) dropAllViews() error {
-	rows, err := h.db.Query("select table_name from INFORMATION_SCHEMA.views")
+	rows, err := h.db.QueryContext(context.Background(), "select table_name from INFORMATION_SCHEMA.views")
+	if rows != nil {
+		defer rows.Close()
+	}
 	if err != nil {
 		return err
 	}
@@ -213,7 +251,7 @@ func columns(rows *sql.Rows) (string, []interface{}, error) {
 			colVal := sql.NullString{}
 			columns = append(columns, &colVal)
 			sb.WriteString("T")
-		case "DECIMAL", "DOUBLE", "FLOAT":
+		case "DECIMAL", "DOUBLE", "FLOAT", "FLOAT8", "NUMERIC":
 			colVal := sql.NullFloat64{}
 			columns = append(columns, &colVal)
 			sb.WriteString("R")
@@ -221,6 +259,10 @@ func columns(rows *sql.Rows) (string, []interface{}, error) {
 			colVal := sql.NullInt64{}
 			columns = append(columns, &colVal)
 			sb.WriteString("I")
+		case "UNKNOWN": // used for NULL values
+			colVal := sql.NullString{}
+			columns = append(columns, &colVal)
+			sb.WriteString("I") // is this right?
 		default:
 			return "", nil, fmt.Errorf("Unhandled type %s", columnType.DatabaseTypeName())
 		}

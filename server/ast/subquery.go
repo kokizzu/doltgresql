@@ -15,22 +15,18 @@
 package ast
 
 import (
-	"fmt"
-
 	vitess "github.com/dolthub/vitess/go/vt/sqlparser"
 
 	"github.com/dolthub/doltgresql/postgres/parser/sem/tree"
+	"github.com/dolthub/doltgresql/utils"
 )
 
 // nodeSubquery handles *tree.Subquery nodes.
-func nodeSubquery(node *tree.Subquery) (*vitess.Subquery, error) {
+func nodeSubquery(ctx *Context, node *tree.Subquery) (*vitess.Subquery, error) {
 	if node == nil {
 		return nil, nil
 	}
-	if node.Exists {
-		return nil, fmt.Errorf("EXISTS is not yet supported")
-	}
-	selectStmt, err := nodeSelectStatement(node.Select)
+	selectStmt, err := nodeSelectStatement(ctx, node.Select)
 	if err != nil {
 		return nil, err
 	}
@@ -40,13 +36,27 @@ func nodeSubquery(node *tree.Subquery) (*vitess.Subquery, error) {
 }
 
 // nodeSubquery handles *tree.Subquery nodes, returning a vitess.TableExpr.
-func nodeSubqueryToTableExpr(node *tree.Subquery) (vitess.TableExpr, error) {
-	subquery, err := nodeSubquery(node)
+func nodeSubqueryToTableExpr(ctx *Context, node *tree.Subquery) (vitess.TableExpr, error) {
+	subquery, err := nodeSubquery(ctx, node)
 	if err != nil {
 		return nil, err
 	}
 	return &vitess.AliasedTableExpr{
 		Expr: subquery,
-		As:   vitess.NewTableIdent(generateUniqueAlias()),
+		As:   vitess.NewTableIdent(utils.GenerateUniqueAlias()),
+	}, nil
+}
+
+// nodeSubqueryOrExists handles *tree.Subquery nodes that may be an EXISTS subquery, returning a vitess.Expr.
+func nodeSubqueryOrExists(ctx *Context, node *tree.Subquery) (vitess.Expr, error) {
+	subquery, err := nodeSubquery(ctx, node)
+	if err != nil {
+		return nil, err
+	}
+	if !node.Exists {
+		return subquery, nil
+	}
+	return &vitess.ExistsExpr{
+		Subquery: subquery,
 	}, nil
 }

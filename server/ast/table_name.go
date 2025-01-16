@@ -15,7 +15,6 @@
 package ast
 
 import (
-	"fmt"
 	"strings"
 
 	vitess "github.com/dolthub/vitess/go/vt/sqlparser"
@@ -24,15 +23,29 @@ import (
 )
 
 // nodeTableName handles *tree.TableName nodes.
-func nodeTableName(node *tree.TableName) (vitess.TableName, error) {
+func nodeTableName(ctx *Context, node *tree.TableName) (vitess.TableName, error) {
 	if node == nil {
 		return vitess.TableName{}, nil
 	}
-	if node.ExplicitCatalog || node.ExplicitSchema && strings.ToLower(string(node.SchemaName)) != "information_schema" {
-		return vitess.TableName{}, fmt.Errorf("referencing items outside the schema or database is not yet supported")
+	var dbName, schemaName vitess.TableIdent
+	if node.ExplicitCatalog {
+		dbName = vitess.NewTableIdent(string(node.CatalogName))
 	}
-	return vitess.TableName{
-		Name:      vitess.NewTableIdent(string(node.ObjectName)),
-		Qualifier: vitess.NewTableIdent(string(node.SchemaName)),
-	}, nil
+	if node.ExplicitSchema {
+		schemaName = vitess.NewTableIdent(string(node.SchemaName))
+	}
+	// for the information_schema schema, we treat it as a database name to make queries against it work with the engine
+	// TODO: this is a hack, we need to handle information_schema differently for doltgres, and as a true schema in each db
+	if strings.EqualFold(schemaName.String(), "information_schema") {
+		return vitess.TableName{
+			Name:        vitess.NewTableIdent(string(node.ObjectName)),
+			DbQualifier: schemaName,
+		}, nil
+	} else {
+		return vitess.TableName{
+			Name:            vitess.NewTableIdent(string(node.ObjectName)),
+			DbQualifier:     dbName,
+			SchemaQualifier: schemaName,
+		}, nil
+	}
 }

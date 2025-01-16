@@ -15,23 +15,34 @@
 package ast
 
 import (
-	"fmt"
-
 	vitess "github.com/dolthub/vitess/go/vt/sqlparser"
 
 	"github.com/dolthub/doltgresql/postgres/parser/sem/tree"
 )
 
 // nodeUnresolvedObjectName handles *tree.UnresolvedObjectName nodes.
-func nodeUnresolvedObjectName(node *tree.UnresolvedObjectName) (vitess.TableName, error) {
+func nodeUnresolvedObjectName(ctx *Context, node *tree.UnresolvedObjectName) (vitess.TableName, error) {
 	if node == nil {
 		return vitess.TableName{}, nil
 	}
+
+	var tableName vitess.TableIdent
+	var dbQual vitess.TableIdent
+	var schemaQual vitess.TableIdent
+
+	tableName = vitess.NewTableIdent(node.Parts[0])
+
 	if node.NumParts > 1 {
-		return vitess.TableName{}, fmt.Errorf("referencing items outside the schema or database is not yet supported")
+		schemaQual = vitess.NewTableIdent(node.Parts[1])
 	}
+
+	if node.NumParts > 2 {
+		dbQual = vitess.NewTableIdent(node.Parts[2])
+	}
+
 	return vitess.TableName{
-		Name:      vitess.NewTableIdent(node.Parts[0]),
-		Qualifier: vitess.TableIdent{},
+		Name:            tableName,
+		DbQualifier:     dbQual,
+		SchemaQualifier: schemaQual,
 	}, nil
 }

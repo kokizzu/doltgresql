@@ -1,0 +1,7 @@
+DROP AGGREGATE [ IF EXISTS ] { $name$ ( $aggregate_signature$ ) } [ , ... ] [ CASCADE | RESTRICT ]
+
+where $aggregate_signature$ is:
+
+* |
+    { [ $agg_argmode$ ] [ $argname$ ] $argtype$ } [ , ... ] |
+    [ { [ $agg_argmode$ ] [ $argname$ ] $argtype$ } [ , ... ] ] ORDER BY { [ $agg_argmode$ ] [ $argname$ ] $argtype$ } [ , ... ]

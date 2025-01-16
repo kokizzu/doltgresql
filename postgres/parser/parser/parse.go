@@ -38,6 +38,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/errors"
+	vitess "github.com/dolthub/vitess/go/vt/sqlparser"
 
 	"github.com/dolthub/doltgresql/postgres/parser/pgcode"
 	"github.com/dolthub/doltgresql/postgres/parser/pgerror"
@@ -101,11 +102,8 @@ type Parser struct {
 	stmtBuf    [1]Statement
 }
 
-// INT8 is the historical interpretation of INT. This should be left
-// alone in the future, since there are many sql fragments stored
-// in various descriptors.  Any user input that was created after
-// INT := INT4 will simply use INT4 in any resulting code.
-var defaultNakedIntType = types.Int
+// This is the default integer type when no integer type is explicitly specified.
+var defaultNakedIntType = types.Int4
 
 // Parse parses the sql and returns a list of statements.
 func (p *Parser) Parse(sql string) (Statements, error) {
@@ -123,8 +121,10 @@ func (p *Parser) parseOneWithDepth(depth int, sql string) (Statement, error) {
 	if err != nil {
 		return Statement{}, err
 	}
-	if len(stmts) != 1 {
+	if len(stmts) > 1 {
 		return Statement{}, errors.AssertionFailedf("expected 1 statement, but found %d", len(stmts))
+	} else if len(stmts) == 0 {
+		return Statement{}, vitess.ErrEmpty
 	}
 	return stmts[0], nil
 }
@@ -421,9 +421,6 @@ func arrayOf(
 	// If the reference is a statically known type, then return an array type,
 	// rather than an array type reference.
 	if typ, ok := tree.GetStaticallyKnownType(ref); ok {
-		if err := types.CheckArrayElementType(typ); err != nil {
-			return nil, err
-		}
 		return types.MakeArray(typ), nil
 	}
 	return &tree.ArrayTypeReference{ElementType: ref}, nil

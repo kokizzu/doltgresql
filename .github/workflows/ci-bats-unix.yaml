@@ -19,13 +19,13 @@ jobs:
     env:
       use_credentials: ${{ secrets.AWS_SECRET_ACCESS_KEY != '' && secrets.AWS_ACCESS_KEY_ID != '' }}
     steps:
-      - name: Setup Go 1.x
-        uses: actions/setup-go@v3
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          go-version: ^1.21
+          go-version-file: go.mod
         id: go
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
+      - uses: actions/setup-node@v4
         with:
           node-version: ^16
       - name: Create CI Bin
@@ -47,11 +47,7 @@ jobs:
       - name: Install DoltgreSQL
         working-directory: ./
         run: |
-          go build -mod=readonly -o .ci_bin/doltgresql .
-      - name: Setup DoltgreSQL Config
-        run: |
-          doltgresql config --global --add user.name 'Dolthub Actions'
-          doltgresql config --global --add user.email 'actions@dolthub.com'
+          go build -mod=readonly -o .ci_bin/doltgres ./cmd/doltgres
       - name: Install PSQL Ubuntu
         if: matrix.os == 'ubuntu-22.04'
         run: |

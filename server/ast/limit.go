@@ -15,30 +15,85 @@
 package ast
 
 import (
+	"fmt"
+
 	vitess "github.com/dolthub/vitess/go/vt/sqlparser"
 
 	"github.com/dolthub/doltgresql/postgres/parser/sem/tree"
+	pgexprs "github.com/dolthub/doltgresql/server/expression"
 )
 
 // nodeLimit handles *tree.Limit nodes.
-func nodeLimit(node *tree.Limit) (*vitess.Limit, error) {
+func nodeLimit(ctx *Context, node *tree.Limit) (*vitess.Limit, error) {
 	if node == nil || (node.Count == nil && node.Offset == nil) {
 		return nil, nil
 	}
 	var count vitess.Expr
 	if !node.LimitAll {
 		var err error
-		count, err = nodeExpr(node.Count)
+		count, err = nodeExpr(ctx, node.Count)
 		if err != nil {
 			return nil, err
 		}
 	}
-	offset, err := nodeExpr(node.Offset)
+	offset, err := nodeExpr(ctx, node.Offset)
 	if err != nil {
 		return nil, err
+	}
+	// GMS is hardcoded to expect vitess.SQLVal for expressions such as `LIMIT 1 OFFSET 1`.
+	// We need to remove the hard dependency, but for now, we'll just convert our literals to a vitess.SQLVal.
+	if injectedExpr, ok := count.(vitess.InjectedExpr); ok {
+		if literal, ok := injectedExpr.Expression.(*pgexprs.Literal); ok {
+			l := literal.Value()
+			limitValue, err := int64ValueForLimit(l)
+			if err != nil {
+				return nil, err
+			}
+
+			if limitValue < 0 {
+				return nil, fmt.Errorf("LIMIT must be greater than or equal to 0")
+			}
+
+			count = literal.ToVitessLiteral()
+		}
+	}
+	if injectedExpr, ok := offset.(vitess.InjectedExpr); ok {
+		if literal, ok := injectedExpr.Expression.(*pgexprs.Literal); ok {
+			o := literal.Value()
+			offsetVal, err := int64ValueForLimit(o)
+			if err != nil {
+				return nil, err
+			}
+
+			if offsetVal < 0 {
+				return nil, fmt.Errorf("OFFSET must be greater than or equal to 0")
+			}
+
+			offset = literal.ToVitessLiteral()
+		}
 	}
 	return &vitess.Limit{
 		Offset:   offset,
 		Rowcount: count,
 	}, nil
+}
+
+// int64ValueForLimit converts a literal value to an int64
+func int64ValueForLimit(l any) (int64, error) {
+	var limitValue int64
+	switch l := l.(type) {
+	case int:
+		limitValue = int64(l)
+	case int32:
+		limitValue = int64(l)
+	case int64:
+		limitValue = l
+	case float64:
+		limitValue = int64(l)
+	case float32:
+		limitValue = int64(l)
+	default:
+		return 0, fmt.Errorf("unsupported limit/offset value type %T", l)
+	}
+	return limitValue, nil
 }

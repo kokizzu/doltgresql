@@ -27,11 +27,8 @@ package tree
 import (
 	"context"
 	"fmt"
-	"math/big"
-	"regexp"
 
 	"github.com/cockroachdb/errors"
-	"github.com/lib/pq/oid"
 
 	"github.com/dolthub/doltgresql/postgres/parser/geo"
 	"github.com/dolthub/doltgresql/postgres/parser/pgcode"
@@ -41,21 +38,8 @@ import (
 )
 
 var (
-	// ErrIntOutOfRange is reported when integer arithmetic overflows.
-	ErrIntOutOfRange = pgerror.New(pgcode.NumericValueOutOfRange, "integer out of range")
-	// ErrFloatOutOfRange is reported when float arithmetic overflows.
-	ErrFloatOutOfRange = pgerror.New(pgcode.NumericValueOutOfRange, "float out of range")
-	errDecOutOfRange   = pgerror.New(pgcode.NumericValueOutOfRange, "decimal out of range")
-
 	// ErrDivByZero is reported on a division by zero.
-	ErrDivByZero       = pgerror.New(pgcode.DivisionByZero, "division by zero")
-	errSqrtOfNegNumber = pgerror.New(pgcode.InvalidArgumentForPowerFunction, "cannot take square root of a negative number")
-
-	// ErrShiftArgOutOfRange is reported when a shift argument is out of range.
-	ErrShiftArgOutOfRange = pgerror.New(pgcode.InvalidParameterValue, "shift argument out of range")
-
-	big10E6  = big.NewInt(1e6)
-	big10E10 = big.NewInt(1e10)
+	ErrDivByZero = pgerror.New(pgcode.DivisionByZero, "division by zero")
 )
 
 // UnaryOp is a unary operator.
@@ -160,6 +144,29 @@ var UnaryOps = unaryOpFixups(map[UnaryOperator]unaryOpOverload{
 		&UnaryOp{
 			Typ:        types.Decimal,
 			ReturnType: types.Decimal,
+			Volatility: VolatilityImmutable,
+		},
+	},
+
+	UnaryAbsolute: {
+		&UnaryOp{
+			Typ:        types.Int,
+			ReturnType: types.Int,
+			Volatility: VolatilityImmutable,
+		},
+		&UnaryOp{
+			Typ:        types.Float,
+			ReturnType: types.Float,
+			Volatility: VolatilityImmutable,
+		},
+		&UnaryOp{
+			Typ:        types.Decimal,
+			ReturnType: types.Decimal,
+			Volatility: VolatilityImmutable,
+		},
+		&UnaryOp{
+			Typ:        types.Interval,
+			ReturnType: types.Interval,
 			Volatility: VolatilityImmutable,
 		},
 	},
@@ -1478,19 +1485,6 @@ func init() {
 	}
 }
 
-func boolFromCmp(cmp int, op ComparisonOperator) *DBool {
-	switch op {
-	case EQ, IsNotDistinctFrom:
-		return MakeDBool(cmp == 0)
-	case LT:
-		return MakeDBool(cmp < 0)
-	case LE:
-		return MakeDBool(cmp <= 0)
-	default:
-		panic(errors.AssertionFailedf("unexpected ComparisonOperator in boolFromCmp: %v", errors.Safe(op)))
-	}
-}
-
 func makeEvalTupleIn(typ *types.T, v Volatility) *CmpOp {
 	return &CmpOp{
 		LeftType:     typ,
@@ -1571,25 +1565,6 @@ type ClientNoticeSender interface {
 	SendClientNotice(ctx context.Context, notice error)
 }
 
-// PrivilegedAccessor gives access to certain queries that would otherwise
-// require someone with RootUser access to query a given data source.
-// It is defined independently to prevent a circular dependency on sql, tree and sqlbase.
-type PrivilegedAccessor interface {
-	// LookupNamespaceID returns the id of the namespace given it's parent id and name.
-	// It is meant as a replacement for looking up the system.namespace directly.
-	// Returns the id, a bool representing whether the namespace exists, and an error
-	// if there is one.
-	LookupNamespaceID(
-		ctx context.Context, parentID int64, name string,
-	) (DInt, bool, error)
-
-	// LookupZoneConfig returns the zone config given a namespace id.
-	// It is meant as a replacement for looking up system.zones directly.
-	// Returns the config byte array, a bool representing whether the namespace exists,
-	// and an error if there is one.
-	LookupZoneConfigByNamespaceID(ctx context.Context, id int64) (DBytes, bool, error)
-}
-
 // SequenceOperators is used for various sql related functions that can
 // be used from EvalContext.
 type SequenceOperators interface {
@@ -1650,32 +1625,6 @@ type EvalContextTestingKnobs struct {
 	// cost of each expression in the query tree for the purpose of creating
 	// alternate query plans in the optimizer.
 	OptimizerCostPerturbation float64
-}
-
-// pgSignatureRegexp matches a Postgres function type signature, capturing the
-// name of the function into group 1.
-// e.g. function(a, b, c) or function( a )
-var pgSignatureRegexp = regexp.MustCompile(`^\s*([\w\.]+)\s*\((?:(?:\s*\w+\s*,)*\s*\w+)?\s*\)\s*$`)
-
-// regTypeInfo contains details on a pg_catalog table that has a reg* type.
-type regTypeInfo struct {
-	tableName string
-	// nameCol is the name of the column that contains the table's entity name.
-	nameCol string
-	// objName is a human-readable name describing the objects in the table.
-	objName string
-	// errType is the pg error code in case the object does not exist.
-	errType pgcode.Code
-}
-
-// regTypeInfos maps an oid.Oid to a regTypeInfo that describes the pg_catalog
-// table that contains the entities of the type of the key.
-var regTypeInfos = map[oid.Oid]regTypeInfo{
-	oid.T_regclass:     {"pg_class", "relname", "relation", pgcode.UndefinedTable},
-	oid.T_regtype:      {"pg_type", "typname", "type", pgcode.UndefinedObject},
-	oid.T_regproc:      {"pg_proc", "proname", "function", pgcode.UndefinedFunction},
-	oid.T_regprocedure: {"pg_proc", "proname", "function", pgcode.UndefinedFunction},
-	oid.T_regnamespace: {"pg_namespace", "nspname", "namespace", pgcode.UndefinedObject},
 }
 
 // FoldComparisonExpr folds a given comparison operation and its expressions

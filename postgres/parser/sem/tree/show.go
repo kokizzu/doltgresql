@@ -50,38 +50,6 @@ func (node *ShowVar) Format(ctx *FmtCtx) {
 	})
 }
 
-// ShowClusterSetting represents a SHOW CLUSTER SETTING statement.
-type ShowClusterSetting struct {
-	Name string
-}
-
-// Format implements the NodeFormatter interface.
-func (node *ShowClusterSetting) Format(ctx *FmtCtx) {
-	ctx.WriteString("SHOW CLUSTER SETTING ")
-	// Cluster setting names never contain PII and should be distinguished
-	// for feature tracking purposes.
-	ctx.WithFlags(ctx.flags & ^FmtAnonymize, func() {
-		ctx.FormatNameP(&node.Name)
-	})
-}
-
-// ShowClusterSettingList represents a SHOW [ALL|PUBLIC] CLUSTER SETTINGS statement.
-type ShowClusterSettingList struct {
-	// All indicates whether to include non-public settings in the output.
-	All bool
-}
-
-// Format implements the NodeFormatter interface.
-func (node *ShowClusterSettingList) Format(ctx *FmtCtx) {
-	ctx.WriteString("SHOW ")
-	qual := "PUBLIC"
-	if node.All {
-		qual = "ALL"
-	}
-	ctx.WriteString(qual)
-	ctx.WriteString(" CLUSTER SETTINGS")
-}
-
 // BackupDetails represents the type of details to display for a SHOW BACKUP
 // statement.
 type BackupDetails int
@@ -495,47 +463,6 @@ type ShowRoles struct {
 // Format implements the NodeFormatter interface.
 func (node *ShowRoles) Format(ctx *FmtCtx) {
 	ctx.WriteString("SHOW ROLES")
-}
-
-// ShowRanges represents a SHOW RANGES statement.
-type ShowRanges struct {
-	TableOrIndex TableIndexName
-	DatabaseName Name
-}
-
-// Format implements the NodeFormatter interface.
-func (node *ShowRanges) Format(ctx *FmtCtx) {
-	ctx.WriteString("SHOW RANGES FROM ")
-	if node.DatabaseName != "" {
-		ctx.WriteString("DATABASE ")
-		ctx.FormatNode(&node.DatabaseName)
-	} else if node.TableOrIndex.Index != "" {
-		ctx.WriteString("INDEX ")
-		ctx.FormatNode(&node.TableOrIndex)
-	} else {
-		ctx.WriteString("TABLE ")
-		ctx.FormatNode(&node.TableOrIndex)
-	}
-}
-
-// ShowRangeForRow represents a SHOW RANGE FOR ROW statement.
-type ShowRangeForRow struct {
-	TableOrIndex TableIndexName
-	Row          Exprs
-}
-
-// Format implements the NodeFormatter interface.
-func (node *ShowRangeForRow) Format(ctx *FmtCtx) {
-	ctx.WriteString("SHOW RANGE FROM ")
-	if node.TableOrIndex.Index != "" {
-		ctx.WriteString("INDEX ")
-	} else {
-		ctx.WriteString("TABLE ")
-	}
-	ctx.FormatNode(&node.TableOrIndex)
-	ctx.WriteString(" FOR ROW (")
-	ctx.FormatNode(&node.Row)
-	ctx.WriteString(")")
 }
 
 // ShowFingerprints represents a SHOW EXPERIMENTAL_FINGERPRINTS statement.

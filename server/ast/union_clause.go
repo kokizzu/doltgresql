@@ -23,15 +23,15 @@ import (
 )
 
 // nodeUnionClause handles tree.UnionClause nodes.
-func nodeUnionClause(node *tree.UnionClause) (*vitess.SetOp, error) {
+func nodeUnionClause(ctx *Context, node *tree.UnionClause) (*vitess.SetOp, error) {
 	if node == nil {
 		return nil, nil
 	}
-	left, err := nodeSelect(node.Left)
+	left, err := nodeSelect(ctx, node.Left)
 	if err != nil {
 		return nil, err
 	}
-	right, err := nodeSelect(node.Right)
+	right, err := nodeSelect(ctx, node.Right)
 	if err != nil {
 		return nil, err
 	}
@@ -50,11 +50,17 @@ func nodeUnionClause(node *tree.UnionClause) (*vitess.SetOp, error) {
 			unionType = vitess.IntersectStr
 		}
 	case tree.ExceptOp:
-		// This is not implemented on the GMS side, so we'll throw an appropriate error here
-		return nil, fmt.Errorf("EXCEPT is not yet supported")
+		if node.All {
+			unionType = vitess.ExceptAllStr
+		} else {
+			unionType = vitess.ExceptStr
+		}
 	default:
 		return nil, fmt.Errorf("unknown type of UNION operator: `%s`", node.Type.String())
 	}
+
+	// TODO next: the types here are incorrect for parenthetical table statements
+	// Need to compare with the vitess result to see what the correct type is here
 	return &vitess.SetOp{
 		Type:  unionType,
 		Left:  left,

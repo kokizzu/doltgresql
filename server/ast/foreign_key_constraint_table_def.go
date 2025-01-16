@@ -23,7 +23,7 @@ import (
 )
 
 // nodeForeignKeyConstraintTableDef handles *tree.ForeignKeyConstraintTableDef nodes.
-func nodeForeignKeyConstraintTableDef(node *tree.ForeignKeyConstraintTableDef) (*vitess.ForeignKeyDefinition, error) {
+func nodeForeignKeyConstraintTableDef(ctx *Context, node *tree.ForeignKeyConstraintTableDef) (*vitess.ForeignKeyDefinition, error) {
 	if node == nil {
 		return nil, nil
 	}
@@ -37,7 +37,7 @@ func nodeForeignKeyConstraintTableDef(node *tree.ForeignKeyConstraintTableDef) (
 	default:
 		return nil, fmt.Errorf("unknown foreign key MATCH strategy")
 	}
-	tableName, err := nodeTableName(&node.Table)
+	tableName, err := nodeTableName(ctx, &node.Table)
 	if err != nil {
 		return nil, err
 	}
@@ -50,17 +50,23 @@ func nodeForeignKeyConstraintTableDef(node *tree.ForeignKeyConstraintTableDef) (
 		toCols[i] = vitess.NewColIdent(string(node.ToCols[i]))
 	}
 	var refActions [2]vitess.ReferenceAction
-	for i, refAction := range []tree.ReferenceAction{node.Actions.Delete, node.Actions.Update} {
-		switch refAction {
+	for i, refAction := range []tree.RefAction{node.Actions.Delete, node.Actions.Update} {
+		switch refAction.Action {
 		case tree.NoAction:
 			refActions[i] = vitess.NoAction
 		case tree.Restrict:
 			refActions[i] = vitess.Restrict
 		case tree.SetNull:
 			refActions[i] = vitess.SetNull
+			if refAction.Columns != nil {
+				return nil, fmt.Errorf("SET NULL <columns> is not yet supported")
+			}
 		case tree.SetDefault:
 			// GMS doesn't support this as MySQL doesn't support this
-			return nil, fmt.Errorf("SET DEFAULT is not yet supported")
+			refActions[i] = vitess.SetDefault
+			if refAction.Columns != nil {
+				return nil, fmt.Errorf("SET NULL <columns> is not yet supported")
+			}
 		case tree.Cascade:
 			refActions[i] = vitess.Cascade
 		default:

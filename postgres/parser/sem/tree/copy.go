@@ -24,11 +24,14 @@
 
 package tree
 
-import "github.com/cockroachdb/errors"
+import (
+	"github.com/cockroachdb/errors"
+)
 
 // CopyFrom represents a COPY FROM statement.
 type CopyFrom struct {
 	Table   TableName
+	File    string
 	Columns NameList
 	Stdin   bool
 	Options CopyOptions
@@ -36,8 +39,9 @@ type CopyFrom struct {
 
 // CopyOptions describes options for COPY execution.
 type CopyOptions struct {
-	Destination Expr
-	CopyFormat  CopyFormat
+	CopyFormat CopyFormat
+	Header     bool
+	Delimiter  string
 }
 
 var _ NodeFormatter = &CopyOptions{}
@@ -59,6 +63,9 @@ func (node *CopyFrom) Format(ctx *FmtCtx) {
 		ctx.WriteString(" WITH ")
 		ctx.FormatNode(&node.Options)
 	}
+	if node.Options.Delimiter != "" {
+		ctx.WriteString(" DELIMITER '" + node.Options.Delimiter + "'")
+	}
 }
 
 // Format implements the NodeFormatter interface
@@ -70,20 +77,18 @@ func (o *CopyOptions) Format(ctx *FmtCtx) {
 		}
 		addSep = true
 	}
-	if o.Destination != nil {
-		// Lowercase because that's what has historically been produced
-		// by copy_file_upload.go, so this will provide backward
-		// compatibility with older servers.
-		ctx.WriteString("destination = ")
-		o.Destination.Format(ctx)
-		addSep = true
-	}
 	if o.CopyFormat != CopyFormatText {
 		maybeAddSep()
 		switch o.CopyFormat {
+		case CopyFormatCsv:
+			ctx.WriteString("FORMAT CSV")
 		case CopyFormatBinary:
-			ctx.WriteString("BINARY")
+			ctx.WriteString("FORMAT BINARY")
 		}
+	}
+	if o.Header {
+		maybeAddSep()
+		ctx.WriteString("HEADER")
 	}
 }
 
@@ -95,18 +100,27 @@ func (o CopyOptions) IsDefault() bool {
 // CombineWith merges other options into this struct. An error is returned if
 // the same option merged multiple times.
 func (o *CopyOptions) CombineWith(other *CopyOptions) error {
-	if other.Destination != nil {
-		if o.Destination != nil {
-			return errors.New("destination option specified multiple times")
-		}
-		o.Destination = other.Destination
-	}
 	if other.CopyFormat != CopyFormatText {
 		if o.CopyFormat != CopyFormatText {
 			return errors.New("format option specified multiple times")
 		}
 		o.CopyFormat = other.CopyFormat
 	}
+
+	if other.Header {
+		if o.Header {
+			return errors.New("header option specified multiple times")
+		}
+		o.Header = other.Header
+	}
+
+	if other.Delimiter != "" {
+		if o.Delimiter != "" {
+			return errors.New("delimiter option specified multiple times")
+		}
+		o.Delimiter = other.Delimiter
+	}
+
 	return nil
 }
 
@@ -117,4 +131,5 @@ type CopyFormat int
 const (
 	CopyFormatText CopyFormat = iota
 	CopyFormatBinary
+	CopyFormatCsv
 )

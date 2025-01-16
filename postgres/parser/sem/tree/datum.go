@@ -37,8 +37,6 @@ import (
 	"github.com/cockroachdb/apd/v2"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
-	"golang.org/x/text/collate"
-	"golang.org/x/text/language"
 
 	"github.com/dolthub/doltgresql/postgres/parser/duration"
 	"github.com/dolthub/doltgresql/postgres/parser/geo"
@@ -68,7 +66,7 @@ var (
 	DBoolFalse = &constDBoolFalse
 
 	// DNull is the NULL Datum.
-	DNull Datum = dNull{}
+	DNull Datum = NullLiteral{}
 
 	// DTimeMaxTimeRegex is a compiled regex for parsing the 24:00 time value.
 	DTimeMaxTimeRegex = regexp.MustCompile(`^([0-9-]*(\s|T))?\s*24:00(:00(.0+)?)?\s*$`)
@@ -611,40 +609,6 @@ type DCollatedString struct {
 	Key []byte
 }
 
-// CollationEnvironment stores the state needed by NewDCollatedString to
-// construct collation keys efficiently.
-type CollationEnvironment struct {
-	cache  map[string]collationEnvironmentCacheEntry
-	buffer *collate.Buffer
-}
-
-type collationEnvironmentCacheEntry struct {
-	// locale is interned.
-	locale string
-	// collator is an expensive factory.
-	collator *collate.Collator
-}
-
-func (env *CollationEnvironment) getCacheEntry(
-	locale string,
-) (collationEnvironmentCacheEntry, error) {
-	entry, ok := env.cache[locale]
-	if !ok {
-		if env.cache == nil {
-			env.cache = make(map[string]collationEnvironmentCacheEntry)
-		}
-		tag, err := language.Parse(locale)
-		if err != nil {
-			err = errors.NewAssertionErrorWithWrappedErrf(err, "failed to parse locale %q", locale)
-			return collationEnvironmentCacheEntry{}, err
-		}
-
-		entry = collationEnvironmentCacheEntry{locale, collate.New(tag)}
-		env.cache[locale] = entry
-	}
-	return entry, nil
-}
-
 // AmbiguousFormat implements the Datum interface.
 func (*DCollatedString) AmbiguousFormat() bool { return false }
 
@@ -768,10 +732,6 @@ type DIPAddr struct {
 // ResolvedType implements the TypedExpr interface.
 func (*DIPAddr) ResolvedType() *types.T {
 	return types.INet
-}
-
-func (d DIPAddr) equal(other *DIPAddr) bool {
-	return d.IPAddr.Equal(&other.IPAddr)
 }
 
 // AmbiguousFormat implements the Datum interface.
@@ -961,13 +921,12 @@ func NewDTimeTZFromOffset(t timeofday.TimeOfDay, offsetSecs int32) *DTimeTZ {
 }
 
 // ParseDTimeTZ parses and returns the *DTime Datum value represented by the
-// provided string, or an error if parsing is unsuccessful.
+// provided string, or an error if parsing is unsuccessful. The |loc| used
+// to set the timezone used to parse the time value.
 //
 // The dependsOnContext return value indicates if we had to consult the
 // ParseTimeContext (either for the time or the local timezone).
-func ParseDTimeTZ(
-	ctx ParseTimeContext, s string, precision time.Duration,
-) (_ *DTimeTZ, dependsOnContext bool, _ error) {
+func ParseDTimeTZ(ctx ParseTimeContext, s string, precision time.Duration) (_ *DTimeTZ, dependsOnContext bool, _ error) {
 	now := relativeParseTime(ctx)
 	d, dependsOnContext, err := timetz.ParseTimeTZ(now, s, precision)
 	if err != nil {
@@ -1117,10 +1076,8 @@ func MustMakeDTimestampTZ(t time.Time, precision time.Duration) *DTimestampTZ {
 //
 // The dependsOnContext return value indicates if we had to consult the
 // ParseTimeContext (either for the time or the local timezone).
-func ParseDTimestampTZ(
-	ctx ParseTimeContext, s string, precision time.Duration,
-) (_ *DTimestampTZ, dependsOnContext bool, _ error) {
-	now := relativeParseTime(ctx)
+func ParseDTimestampTZ(ctx ParseTimeContext, s string, precision time.Duration, loc *time.Location) (_ *DTimestampTZ, dependsOnContext bool, _ error) {
+	now := relativeParseTime(ctx).In(loc)
 	t, dependsOnContext, err := pgdate.ParseTimestamp(now, pgdate.ParseModeYMD, s)
 	if err != nil {
 		return nil, false, err
@@ -1601,18 +1558,18 @@ func (d *DTuple) ContainsNull() bool {
 	return false
 }
 
-type dNull struct{}
+type NullLiteral struct{}
 
 // ResolvedType implements the TypedExpr interface.
-func (dNull) ResolvedType() *types.T {
+func (NullLiteral) ResolvedType() *types.T {
 	return types.Unknown
 }
 
 // AmbiguousFormat implements the Datum interface.
-func (dNull) AmbiguousFormat() bool { return false }
+func (NullLiteral) AmbiguousFormat() bool { return false }
 
 // Format implements the NodeFormatter interface.
-func (dNull) Format(ctx *FmtCtx) {
+func (NullLiteral) Format(ctx *FmtCtx) {
 	if ctx.HasFlags(fmtPgwireFormat) {
 		// NULL sub-expressions in pgwire text values are represented with
 		// the empty string.
@@ -1622,7 +1579,7 @@ func (dNull) Format(ctx *FmtCtx) {
 }
 
 // Size implements the Datum interface.
-func (d dNull) Size() uintptr {
+func (d NullLiteral) Size() uintptr {
 	return unsafe.Sizeof(d)
 }
 
@@ -2050,7 +2007,7 @@ func wrapWithOid(d Datum, oid oid.Oid) Datum {
 	case *DInt:
 	case *DString:
 	case *DArray:
-	case dNull, *DOidWrapper:
+	case NullLiteral, *DOidWrapper:
 		panic(errors.AssertionFailedf("cannot wrap %T with an Oid", v))
 	default:
 		// Currently only *DInt, *DString, *DArray are hooked up to work with
